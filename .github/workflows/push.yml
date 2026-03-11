@@ -16,6 +16,7 @@ on:
         required: false
         type: string
         default: ""
+
       project:
         required: false
         type: string
@@ -36,6 +37,21 @@ on:
         type: boolean
         default: true
 
+      run_tests:
+        required: false
+        type: boolean
+        default: true
+
+      run_coverage:
+        required: false
+        type: boolean
+        default: true
+
+      run_static_analysis:
+        required: false
+        type: boolean
+        default: true
+
     outputs:
       coverage_percent:
         value: ${{ jobs.ci.outputs.coverage_percent }}
@@ -47,10 +63,12 @@ defaults:
 jobs:
   ci:
     runs-on: macos-latest
+
     outputs:
       coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
 
     steps:
+
       - uses: actions/checkout@v4
 
       # Optional Xcode version
@@ -60,7 +78,7 @@ jobs:
           sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode_version }}.app/Contents/Developer"
           xcodebuild -version
 
-      # Resolve packages
+      # Resolve dependencies
       - name: Resolve Dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
@@ -69,9 +87,19 @@ jobs:
             -scheme "${{ inputs.scheme }}" || true
 
       # -----------------------
-      # TEST (macOS destination — no simulator instability)
+      # Static Analysis (placeholder)
       # -----------------------
-      - name: Run Unit Tests (No Signing)
+      - name: Static Analysis
+        if: ${{ inputs.run_static_analysis }}
+        run: |
+          echo "Static analysis step placeholder"
+          echo "Add SwiftLint / Sonar / other tools here"
+
+      # -----------------------
+      # TEST
+      # -----------------------
+      - name: Run Unit Tests
+        if: ${{ inputs.run_tests }}
         run: |
           set -euo pipefail
 
@@ -91,13 +119,13 @@ jobs:
           DEVELOPMENT_TEAM="" \
           PROVISIONING_PROFILE_SPECIFIER="" \
           | xcpretty
-          
 
-  # -----------------------
+      # -----------------------
       # COVERAGE
       # -----------------------
       - name: Compute Coverage + Gate
         id: coverage
+        if: ${{ inputs.run_tests && inputs.run_coverage }}
         run: |
           set -euo pipefail
 
@@ -126,7 +154,6 @@ jobs:
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
           echo "📊 App Coverage: ${PCT}%"
 
-          # If threshold is 0 → skip gate
           if awk -v th="$TH" 'BEGIN{exit !(th+0>0)}'; then
             PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
             if [ "$PASS" -ne 1 ]; then
@@ -139,18 +166,18 @@ jobs:
           fi
 
       # -----------------------
-      # ARCHIVE (unsigned)
+      # ARCHIVE
       # -----------------------
       - name: Build Unsigned Archive
         if: ${{ inputs.build_archive }}
         run: |
           set -euo pipefail
-  
+
           mkdir -p release
-          
+
           ARCHIVE_PATH="release/ios-archive-unsigned.xcarchive"
           echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
-          
+
           xcodebuild archive \
           ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
           ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
@@ -167,18 +194,20 @@ jobs:
       # ARTIFACTS
       # -----------------------
       - name: Upload Test Results
-        if: always()
+        if: ${{ always() && inputs.run_tests }}
         uses: actions/upload-artifact@v4
         with:
           name: ios-test-results
           path: ${{ env.RESULT_BUNDLE }}
 
       - name: Prepare Archive For Upload
+        if: ${{ inputs.build_archive }}
         run: |
           mkdir -p artifact
           mv release/ios-archive-unsigned.xcarchive artifact/
 
       - name: Upload Unsigned Archive
+        if: ${{ inputs.build_archive }}
         uses: actions/upload-artifact@v4
         with:
           name: ios-archive-unsigned
