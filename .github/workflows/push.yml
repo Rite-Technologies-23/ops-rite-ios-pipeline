@@ -71,6 +71,48 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # Detect workspace or project
+      # --------------------------------------------------
+
+      - name: Detect Xcode Workspace / Project
+        id: detect
+        run: |
+          set -e
+
+          if [ -n "${{ inputs.workspace }}" ] && [ -d "${{ inputs.workspace }}" ]; then
+            echo "type=workspace" >> $GITHUB_OUTPUT
+            echo "file=${{ inputs.workspace }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ -n "${{ inputs.project }}" ] && [ -d "${{ inputs.project }}" ]; then
+            echo "type=project" >> $GITHUB_OUTPUT
+            echo "file=${{ inputs.project }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          WORKSPACE=$(find . -name "*.xcworkspace" | head -n 1 || true)
+
+          if [ -n "$WORKSPACE" ]; then
+            echo "type=workspace" >> $GITHUB_OUTPUT
+            echo "file=$WORKSPACE" >> $GITHUB_OUTPUT
+            echo "Detected workspace: $WORKSPACE"
+            exit 0
+          fi
+
+          PROJECT=$(find . -name "*.xcodeproj" | head -n 1 || true)
+
+          if [ -n "$PROJECT" ]; then
+            echo "type=project" >> $GITHUB_OUTPUT
+            echo "file=$PROJECT" >> $GITHUB_OUTPUT
+            echo "Detected project: $PROJECT"
+            exit 0
+          fi
+
+          echo "❌ No workspace or project found"
+          exit 1
+
       # Optional Xcode version
       - name: Select Xcode
         if: ${{ inputs.xcode_version != 'latest-stable' }}
@@ -78,26 +120,30 @@ jobs:
           sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode_version }}.app/Contents/Developer"
           xcodebuild -version
 
+      # --------------------------------------------------
       # Resolve dependencies
+      # --------------------------------------------------
+
       - name: Resolve Dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
-            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
-            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+            -${{ steps.detect.outputs.type }} "${{ steps.detect.outputs.file }}" \
             -scheme "${{ inputs.scheme }}" || true
 
-      # -----------------------
-      # Static Analysis (placeholder)
-      # -----------------------
+      # --------------------------------------------------
+      # Static analysis
+      # --------------------------------------------------
+
       - name: Static Analysis
         if: ${{ inputs.run_static_analysis }}
         run: |
-          echo "Static analysis step placeholder"
-          echo "Add SwiftLint / Sonar / other tools here"
+          echo "Static analysis placeholder"
+          echo "Add SwiftLint / Sonar here"
 
-      # -----------------------
-      # TEST
-      # -----------------------
+      # --------------------------------------------------
+      # Tests
+      # --------------------------------------------------
+
       - name: Run Unit Tests
         if: ${{ inputs.run_tests }}
         run: |
@@ -107,22 +153,22 @@ jobs:
           echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
 
           xcodebuild test \
-          ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
-          ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
-          -scheme "${{ inputs.scheme }}" \
-          -destination 'platform=iOS Simulator,name=iPhone 16' \
-          -resultBundlePath "$RESULT_BUNDLE" \
-          -enableCodeCoverage YES \
-          CODE_SIGNING_ALLOWED=NO \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGN_IDENTITY="" \
-          DEVELOPMENT_TEAM="" \
-          PROVISIONING_PROFILE_SPECIFIER="" \
-          | xcpretty
+            -${{ steps.detect.outputs.type }} "${{ steps.detect.outputs.file }}" \
+            -scheme "${{ inputs.scheme }}" \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -enableCodeCoverage YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            | xcpretty
 
-      # -----------------------
-      # COVERAGE
-      # -----------------------
+      # --------------------------------------------------
+      # Coverage
+      # --------------------------------------------------
+
       - name: Compute Coverage + Gate
         id: coverage
         if: ${{ inputs.run_tests && inputs.run_coverage }}
@@ -137,7 +183,7 @@ jobs:
             exit 1
           fi
 
-          echo "🔎 Coverage targets:"
+          echo "Coverage targets:"
           xcrun xccov view --report "$RESULT"
 
           APP_NAME="${{ inputs.scheme }}.app"
@@ -145,29 +191,27 @@ jobs:
           LINE=$(xcrun xccov view --report "$RESULT" | grep "$APP_NAME" | head -n 1 || true)
 
           if [ -z "$LINE" ]; then
-            echo "❌ Could not find $APP_NAME coverage line"
+            echo "❌ Could not find coverage line"
             exit 1
           fi
 
           PCT=$(echo "$LINE" | awk '{print $(NF-1)}' | tr -d '%')
 
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-          echo "📊 App Coverage: ${PCT}%"
+          echo "Coverage: ${PCT}%"
 
           if awk -v th="$TH" 'BEGIN{exit !(th+0>0)}'; then
             PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
             if [ "$PASS" -ne 1 ]; then
-              echo "❌ Coverage ${PCT}% is below threshold ${TH}%"
+              echo "❌ Coverage below threshold"
               exit 1
             fi
-            echo "✅ Coverage gate passed"
-          else
-            echo "ℹ️ Coverage gate disabled"
           fi
 
-      # -----------------------
-      # ARCHIVE
-      # -----------------------
+      # --------------------------------------------------
+      # Archive
+      # --------------------------------------------------
+
       - name: Build Unsigned Archive
         if: ${{ inputs.build_archive }}
         run: |
@@ -179,20 +223,20 @@ jobs:
           echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
 
           xcodebuild archive \
-          ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
-          ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
-          -scheme "${{ inputs.scheme }}" \
-          -configuration "${{ inputs.configuration }}" \
-          -destination "generic/platform=iOS" \
-          -archivePath "$ARCHIVE_PATH" \
-          CODE_SIGNING_ALLOWED=NO \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGN_IDENTITY="" \
-          | xcpretty
+            -${{ steps.detect.outputs.type }} "${{ steps.detect.outputs.file }}" \
+            -scheme "${{ inputs.scheme }}" \
+            -configuration "${{ inputs.configuration }}" \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcpretty
 
-      # -----------------------
-      # ARTIFACTS
-      # -----------------------
+      # --------------------------------------------------
+      # Artifacts
+      # --------------------------------------------------
+
       - name: Upload Test Results
         if: ${{ always() && inputs.run_tests }}
         uses: actions/upload-artifact@v4
@@ -200,13 +244,13 @@ jobs:
           name: ios-test-results
           path: ${{ env.RESULT_BUNDLE }}
 
-      - name: Prepare Archive For Upload
+      - name: Prepare Archive
         if: ${{ inputs.build_archive }}
         run: |
           mkdir -p artifact
           mv release/ios-archive-unsigned.xcarchive artifact/
 
-      - name: Upload Unsigned Archive
+      - name: Upload Archive
         if: ${{ inputs.build_archive }}
         uses: actions/upload-artifact@v4
         with:
