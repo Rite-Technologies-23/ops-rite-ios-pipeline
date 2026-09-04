@@ -1,0 +1,69 @@
+# Periphery configuration -- the vulture of this pipeline.
+#
+# Periphery indexes the whole project and reports declarations nothing
+# references. Unlike SwiftLint's unused_declaration (single-file scope), it
+# resolves across modules, which is what makes it a genuine dead-code tool.
+#
+# Copied into the caller repo at CI time by the dead-code stage. project,
+# schemes and targets are injected on the command line from the detected
+# values, so they are deliberately absent here.
+
+# ---------------------------------------------------------------------------
+# Retention rules. Every one of these exists because the declaration is
+# referenced by something Periphery cannot see: the Objective-C runtime, a
+# storyboard, Codable synthesis, SwiftUI previews, or a test harness.
+# ---------------------------------------------------------------------------
+
+# Public API of a framework target has callers outside the index by definition.
+retain_public: true
+
+# @objc / @IBAction / @IBOutlet members are reached via the ObjC runtime and
+# from Interface Builder, not from Swift call sites.
+retain_objc_accessible: true
+retain_objc_annotated: true
+
+# Codable conformances synthesise CodingKeys and init(from:) that look unused.
+retain_codable_properties: true
+
+# Types referenced only from a storyboard or xib.
+retain_unused_protocol_func_params: false
+
+# Assign-only properties are a real smell, but SwiftUI @State and friends trip
+# this constantly. Report them, do not treat them as dead.
+retain_assign_only_properties: true
+
+# ---------------------------------------------------------------------------
+# Scope
+# ---------------------------------------------------------------------------
+report_exclude:
+  - "**/.build/**"
+  - "**/.pipeline/**"
+  - "**/Pods/**"
+  - "**/Carthage/**"
+  - "**/DerivedData/**"
+  - "**/Generated/**"
+  - "**/*.generated.swift"
+  - "**/*.pb.swift"
+  # Previews exist to be rendered by Xcode, never called from code.
+  - "**/*Preview*.swift"
+  - "**/Preview Content/**"
+
+index_exclude:
+  - "**/.build/**"
+  - "**/.pipeline/**"
+  - "**/Pods/**"
+  - "**/Carthage/**"
+
+# Test targets reference production code; excluding them would make almost
+# everything look used, so they stay indexed. But dead code *inside* tests is
+# not worth failing a build over.
+report_exclude_tests: false
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+format: json
+strict: false
+quiet: false
+disable_update_check: true
+clean_build: false

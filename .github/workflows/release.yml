@@ -26,6 +26,37 @@ on:
         type: string
         default: ""
 
+      # ---- forwarded to the CI stage ----
+      xcode_version:
+        required: false
+        type: string
+        default: "latest-stable"
+
+      scheme:
+        required: false
+        type: string
+        default: ""
+
+      workspace:
+        required: false
+        type: string
+        default: ""
+
+      project:
+        required: false
+        type: string
+        default: ""
+
+      configuration:
+        required: false
+        type: string
+        default: "Release"
+
+      coverage_threshold:
+        required: false
+        type: string
+        default: "0"
+
     secrets:
       # Signing
       IOS_TEAM_ID:
@@ -45,6 +76,9 @@ on:
       APPSTORE_PRIVATE_KEY:
         required: true
 
+      PIPELINE_TOKEN:
+        required: false
+
 permissions:
   contents: write
 
@@ -57,8 +91,24 @@ defaults:
     shell: bash
 
 jobs:
+
+  ci:
+    name: iOS CI (Reusable)
+    uses: ./.github/workflows/push.yml
+    with:
+      xcode_version: ${{ inputs.xcode_version }}
+      scheme: ${{ inputs.scheme }}
+      workspace: ${{ inputs.workspace }}
+      project: ${{ inputs.project }}
+      configuration: ${{ inputs.configuration }}
+      coverage_threshold: ${{ inputs.coverage_threshold }}
+      build_archive: true
+    secrets:
+      PIPELINE_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+
   create_release:
     name: Create GitHub Release
+    needs: ci
     runs-on: macos-latest
     outputs:
       version: ${{ steps.version_check.outputs.version }}

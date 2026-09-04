@@ -1,0 +1,208 @@
+name: "Setup iOS Build Environment"
+description: >-
+  Shared setup for every CI job: resolves and checks out the pipeline repo (for
+  tool configs and scripts), selects Xcode, detects the workspace/project and
+  scheme, restores SPM/CocoaPods/DerivedData caches, and installs only the CLI
+  tools the calling job actually needs.
+
+inputs:
+  xcode_version:
+    required: false
+    default: "latest-stable"
+    description: "Xcode version to select, or latest-stable to keep the runner default"
+
+  workspace:
+    required: false
+    default: ""
+    description: "Path to .xcworkspace. Auto-detected when empty."
+
+  project:
+    required: false
+    default: ""
+    description: "Path to .xcodeproj. Auto-detected when empty."
+
+  scheme:
+    required: false
+    default: ""
+    description: "Xcode scheme. Auto-detected when empty."
+
+  tools:
+    required: false
+    default: ""
+    description: >-
+      Space-separated CLI tools to install: swiftlint swiftformat periphery
+      xcbeautify gitleaks trivy. Only install what the job needs -- each one
+      costs runner minutes.
+
+  resolve_dependencies:
+    required: false
+    default: "true"
+    description: "Run xcodebuild -resolvePackageDependencies and pod install"
+
+  cache_key_suffix:
+    required: false
+    default: "shared"
+    description: "Distinguishes DerivedData cache entries between jobs"
+
+  cache_derived_data:
+    required: false
+    default: "false"
+    description: >-
+      Cache DerivedData for this job. Worth it for jobs that compile; wasteful
+      for lint-only jobs.
+
+  fetch_pipeline:
+    required: false
+    default: "true"
+    description: "Check out this pipeline repo into .pipeline for configs and scripts"
+
+  pipeline_token:
+    required: false
+    default: ""
+    description: >-
+      Token used to check out the pipeline repo. Only needed when the pipeline
+      repo is PRIVATE and the caller lives in a different repo -- the default
+      GITHUB_TOKEN is scoped to the caller repo and will 403.
+
+outputs:
+  pipeline_dir:
+    description: "Directory the pipeline repo was checked out into"
+    value: ${{ steps.resolve.outputs.dir }}
+
+  project_type:
+    description: "workspace or project"
+    value: ${{ steps.detect.outputs.type }}
+
+  project_file:
+    description: "Path to the detected .xcworkspace or .xcodeproj"
+    value: ${{ steps.detect.outputs.file }}
+
+  scheme:
+    description: "Resolved Xcode scheme"
+    value: ${{ steps.detect.outputs.scheme }}
+
+  dependency_manager:
+    description: "spm, cocoapods, both, or none"
+    value: ${{ steps.detect.outputs.dependency_manager }}
+
+runs:
+  using: "composite"
+  steps:
+
+    # ----------------------------------------------------------------------
+    # github.repository is the CALLER inside a reusable workflow, so it cannot
+    # identify this pipeline. github.workflow_ref carries the owning repo and
+    # ref of the workflow file itself, which guarantees configs always match
+    # the workflow version being executed.
+    # ----------------------------------------------------------------------
+    - name: Resolve pipeline source
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-}"
+
+        if [ -n "$WORKFLOW_REF" ]; then
+          PIPELINE_REPO="${WORKFLOW_REF%%/.github/*}"
+          PIPELINE_REF="${WORKFLOW_REF##*@}"
+        else
+          PIPELINE_REPO="Rite-Technologies-23/ops-rite-ios-pipeline"
+          PIPELINE_REF="main"
+        fi
+
+        echo "repo=$PIPELINE_REPO" >> "$GITHUB_OUTPUT"
+        echo "ref=$PIPELINE_REF"   >> "$GITHUB_OUTPUT"
+        echo "dir=.pipeline"       >> "$GITHUB_OUTPUT"
+
+        echo "Pipeline source: $PIPELINE_REPO@$PIPELINE_REF"
+
+    - name: Checkout pipeline repo
+      if: ${{ inputs.fetch_pipeline == 'true' }}
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ steps.resolve.outputs.repo }}
+        ref: ${{ steps.resolve.outputs.ref }}
+        path: ${{ steps.resolve.outputs.dir }}
+        token: ${{ inputs.pipeline_token != '' && inputs.pipeline_token || github.token }}
+        persist-credentials: false
+
+    - name: Select Xcode
+      if: ${{ inputs.xcode_version != 'latest-stable' && runner.os == 'macOS' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        APP="/Applications/Xcode_${{ inputs.xcode_version }}.app"
+
+        if [ ! -d "$APP" ]; then
+          echo "::error::$APP not found. Available Xcode installs:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          exit 1
+        fi
+
+        sudo xcode-select -s "$APP/Contents/Developer"
+        xcodebuild -version
+
+    - name: Detect project, scheme and dependency manager
+      id: detect
+      if: ${{ runner.os == 'macOS' }}
+      shell: bash
+      env:
+        INPUT_WORKSPACE: ${{ inputs.workspace }}
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_SCHEME: ${{ inputs.scheme }}
+      run: bash "$GITHUB_ACTION_PATH/detect_project.sh"
+
+    # ----------------------------------------------------------------------
+    # Caching. SPM checkouts and Pods are keyed on their lockfiles; DerivedData
+    # is keyed loosely and restored best-effort, because a stale-but-warm
+    # DerivedData still saves most of a compile.
+    # ----------------------------------------------------------------------
+    - name: Cache Swift Package Manager
+      if: ${{ runner.os == 'macOS' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/org.swift.swiftpm
+          ~/.swiftpm
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved', '**/*.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+
+    - name: Cache CocoaPods
+      if: ${{ runner.os == 'macOS' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          Pods
+          ~/Library/Caches/CocoaPods
+        key: ${{ runner.os }}-pods-${{ hashFiles('**/Podfile.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-pods-
+
+    - name: Cache DerivedData
+      if: ${{ runner.os == 'macOS' && inputs.cache_derived_data == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Developer/Xcode/DerivedData
+        key: ${{ runner.os }}-dd-${{ inputs.cache_key_suffix }}-${{ hashFiles('**/Package.resolved', '**/Podfile.lock') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-dd-${{ inputs.cache_key_suffix }}-${{ hashFiles('**/Package.resolved', '**/Podfile.lock') }}-
+          ${{ runner.os }}-dd-${{ inputs.cache_key_suffix }}-
+
+    - name: Install CLI tools
+      if: ${{ inputs.tools != '' }}
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: bash "$GITHUB_ACTION_PATH/install_tools.sh"
+
+    - name: Resolve dependencies
+      if: ${{ inputs.resolve_dependencies == 'true' && runner.os == 'macOS' }}
+      shell: bash
+      env:
+        PROJECT_TYPE: ${{ steps.detect.outputs.type }}
+        PROJECT_FILE: ${{ steps.detect.outputs.file }}
+        SCHEME: ${{ steps.detect.outputs.scheme }}
+        DEPENDENCY_MANAGER: ${{ steps.detect.outputs.dependency_manager }}
+      run: bash "$GITHUB_ACTION_PATH/resolve_dependencies.sh"
