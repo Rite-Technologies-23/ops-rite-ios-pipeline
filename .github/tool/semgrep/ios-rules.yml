@@ -1,0 +1,216 @@
+# Swift/iOS Semgrep rules -- the bandit of this pipeline.
+#
+# These complement the public registry packs (r/swift, p/secrets) and target
+# the mobile-specific mistakes that neither the Swift compiler nor SwiftLint
+# will ever flag: insecure storage, broken TLS, weak crypto, and data leaking
+# through logs or the pasteboard.
+#
+# Semgrep OSS is free and needs no account or token.
+rules:
+
+  # -------------------------------------------------------------------------
+  # Transport security
+  # -------------------------------------------------------------------------
+  - id: ios-ats-disabled
+    languages: [generic]
+    paths:
+      include:
+        - "*.plist"
+    severity: ERROR
+    message: >-
+      App Transport Security is globally disabled
+      (NSAllowsArbitraryLoads). This permits cleartext HTTP to any host and is
+      an App Review rejection risk. Scope exceptions per-domain instead.
+    pattern-regex: '<key>NSAllowsArbitraryLoads</key>\s*<true/>'
+
+  - id: ios-tls-validation-disabled
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      TLS certificate validation is bypassed -- the URLSession challenge handler
+      accepts any server trust. Every request becomes MITM-able.
+    pattern-either:
+      - pattern: |
+          URLCredential(trust: $T)
+      - pattern: |
+          completionHandler(.useCredential, URLCredential(trust: ...))
+      - pattern-regex: '\.serverTrust\s*\)\s*\)?\s*;?\s*\n?\s*completionHandler\(\s*\.useCredential'
+
+  - id: ios-cleartext-http-url
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      Cleartext http:// endpoint in source. Use https:// -- ATS blocks cleartext
+      by default and it is trivially interceptable.
+    pattern-regex: '"http://(?!localhost|127\.0\.0\.1)[^"]+"'
+
+  # -------------------------------------------------------------------------
+  # Insecure storage
+  # -------------------------------------------------------------------------
+  - id: ios-sensitive-data-in-userdefaults
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      Sensitive value written to UserDefaults. UserDefaults is an unencrypted
+      plist inside the app container and is readable from a device backup.
+      Use the Keychain.
+    patterns:
+      - pattern-either:
+          - pattern: 'UserDefaults.standard.set($V, forKey: $K)'
+          - pattern: 'UserDefaults.standard.setValue($V, forKey: $K)'
+          - pattern: '$D.set($V, forKey: $K)'
+      - metavariable-regex:
+          metavariable: $K
+          regex: (?i).*(password|passwd|token|secret|apikey|api_key|auth|credential|pin|ssn|card).*
+
+  - id: ios-keychain-accessible-always
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      Keychain item uses kSecAttrAccessibleAlways, which keeps it readable while
+      the device is locked and includes it in unencrypted backups. Prefer
+      kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+    pattern-either:
+      - pattern: kSecAttrAccessibleAlways
+      - pattern: kSecAttrAccessibleAlwaysThisDeviceOnly
+
+  - id: ios-file-protection-none
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      File written with .noFileProtection / .completeUntilFirstUserAuthentication
+      is readable while the device is locked. Use .complete for sensitive data.
+    pattern-either:
+      - pattern: FileProtectionType.none
+      - pattern: .noFileProtection
+
+  # -------------------------------------------------------------------------
+  # Crypto
+  # -------------------------------------------------------------------------
+  - id: ios-weak-hash-algorithm
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      MD5 and SHA-1 are broken for security use. Use SHA-256 or better via
+      CryptoKit.
+    pattern-either:
+      - pattern: Insecure.MD5.hash(...)
+      - pattern: Insecure.SHA1.hash(...)
+      - pattern-regex: 'CC_MD5\('
+      - pattern-regex: 'CC_SHA1\('
+
+  - id: ios-ecb-mode-cipher
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      ECB mode leaks plaintext structure. Use AES-GCM (CryptoKit AES.GCM) with a
+      unique nonce per message.
+    pattern-regex: 'kCCOptionECBMode|CCOptions\(kCCOptionECBMode\)'
+
+  - id: ios-insecure-random-for-secrets
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      arc4random / Int.random are not suitable for key, token or nonce
+      generation. Use SecRandomCopyBytes or CryptoKit.
+    patterns:
+      - pattern-either:
+          - pattern: arc4random()
+          - pattern: arc4random_uniform(...)
+          - pattern: 'Int.random(in: ...)'
+      - pattern-inside: |
+          func $F(...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $F
+          regex: (?i).*(token|nonce|salt|iv|secret|key|password|otp).*
+
+  - id: ios-hardcoded-crypto-key
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      Cryptographic key material appears to be hardcoded. Anyone can extract it
+      from the binary with `strings`. Derive it or store it in the Keychain.
+    pattern-either:
+      - pattern: 'SymmetricKey(data: Data($X))'
+      - pattern-regex: '(?i)(let|var)\s+\w*(key|secret|iv|salt)\w*\s*(:\s*\[UInt8\]\s*)?=\s*\['
+
+  # -------------------------------------------------------------------------
+  # Data leakage
+  # -------------------------------------------------------------------------
+  - id: ios-logging-sensitive-data
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      Potentially sensitive value written to the log. os.Logger redacts
+      interpolated values by default, but print/NSLog do not -- and these end up
+      in sysdiagnose bundles.
+    patterns:
+      - pattern-either:
+          - pattern: print($MSG)
+          - pattern: NSLog($MSG, ...)
+          - pattern: debugPrint($MSG)
+      - metavariable-regex:
+          metavariable: $MSG
+          regex: (?i).*(password|passwd|token|secret|apikey|api_key|authorization|bearer|credential|session).*
+
+  - id: ios-pasteboard-sensitive-data
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      Sensitive value copied to the general pasteboard, which is readable by
+      every app on the device. Set a local pasteboard or an expiry.
+    patterns:
+      - pattern-either:
+          - pattern: UIPasteboard.general.string = $V
+          - pattern: UIPasteboard.general.setValue($V, ...)
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i).*(password|token|secret|card|cvv|pin|otp).*
+
+  # -------------------------------------------------------------------------
+  # WebView
+  # -------------------------------------------------------------------------
+  - id: ios-webview-javascript-bridge
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      A script message handler exposes native code to page JavaScript. Only
+      register one for content you fully control, and validate every message
+      body.
+    pattern: '$C.add($H, name: $N)'
+
+  - id: ios-webview-allows-file-access
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      WebView is granted universal file access, letting a compromised page read
+      app-private files.
+    pattern-either:
+      - pattern: '$C.setValue(true, forKey: "allowUniversalAccessFromFileURLs")'
+      - pattern: '$C.setValue(true, forKey: "allowFileAccessFromFileURLs")'
+
+  # -------------------------------------------------------------------------
+  # Injection
+  # -------------------------------------------------------------------------
+  - id: ios-sql-string-interpolation
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      SQL built by string interpolation. Use parameter binding
+      (sqlite3_bind_*, or the query builder your ORM provides).
+    pattern-regex: '(sqlite3_exec|sqlite3_prepare_v2|executeQuery)\s*\([^)]*\\\('
+
+  - id: ios-unvalidated-url-scheme-handling
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      Incoming URL is acted on without validating its source. Deep links are
+      attacker-controllable; validate the host, path and any parameters.
+    patterns:
+      - pattern-inside: |
+          func application(..., open $URL: URL, ...) -> Bool {
+            ...
+          }
+      - pattern: UIApplication.shared.open($URL, ...)

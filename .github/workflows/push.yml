@@ -1,16 +1,42 @@
-name: "iOS CI - Reusable (Xcode)"
+name: "iOS CI (Xcode) - Reusable"
+
+# ---------------------------------------------------------------------------
+# Complete CI for iOS/Swift, built entirely from free tooling.
+#
+#   Security          Semgrep OSS (Swift rules) + gitleaks + Trivy over
+#                     Package.resolved / Podfile.lock, plus the clang static
+#                     analyzer (optional)
+#   Dead code         Periphery (whole-project unused declarations) +
+#                     SwiftLint unused_declaration / unused_import
+#   Static typing     swiftc with strict concurrency and optional
+#                     warnings-as-errors, injected as xcodebuild overrides
+#   Lint + format     SwiftLint --strict (lint) + SwiftFormat --lint (format)
+#   Tests + coverage  xcodebuild test + xccov line-coverage gate
+#
+# Compiler strictness is injected through xcodebuild build-setting overrides,
+# so a caller repository needs no .xcodeproj or .xcconfig changes.
+#
+# COST NOTE: GitHub bills macOS runners at 10x. Three stages compile the
+# project (test, dead code, archive). The security stage deliberately runs on
+# ubuntu at 1x because gitleaks/Semgrep/Trivy need no Xcode. The clang analyzer
+# stage is a fourth compile and is therefore opt-in.
+# ---------------------------------------------------------------------------
 
 on:
   workflow_call:
     inputs:
+
+      # ---- core (unchanged contract) ----
       xcode_version:
         required: false
         type: string
         default: "latest-stable"
 
       scheme:
-        required: true
+        required: false
         type: string
+        default: ""
+        description: "Xcode scheme. Auto-detected from the project when empty."
 
       workspace:
         required: false
@@ -31,6 +57,7 @@ on:
         required: false
         type: string
         default: "0"
+        description: "Minimum LINE coverage %. 0 disables the gate."
 
       build_archive:
         required: false
@@ -51,208 +78,792 @@ on:
         required: false
         type: boolean
         default: true
+        description: "SwiftLint. Previously a no-op placeholder; now a real gate."
+
+      # ---- runners ----
+      runner:
+        required: false
+        type: string
+        default: macos-latest
+
+      security_runner:
+        required: false
+        type: string
+        default: ubuntu-latest
+        description: >-
+          The security stage needs no Xcode, so it defaults to a 1x-billed
+          Linux runner instead of a 10x-billed macOS one.
+
+      # ---- formatting (the black equivalent) ----
+      run_formatting:
+        required: false
+        type: boolean
+        default: true
+
+      # ---- dead code (the vulture equivalent) ----
+      run_dead_code:
+        required: false
+        type: boolean
+        default: true
+        description: "Periphery whole-project unused-declaration scan. Compiles the project."
+
+      # ---- security (the bandit equivalent) ----
+      run_security:
+        required: false
+        type: boolean
+        default: true
+
+      run_dependency_audit:
+        required: false
+        type: boolean
+        default: true
+
+      run_clang_analyzer:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          xcodebuild analyze. Off by default: it is a full extra compile on a
+          10x runner and finds little in Swift-only codebases (the clang
+          analyzer targets C/Objective-C).
+
+      # ---- static typing strictness ----
+      swift_warnings_as_errors:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Promote Swift/clang warnings to errors. Off by default because it
+          breaks every build on an existing codebase until the backlog is cleared.
+
+      swift_strict_concurrency:
+        required: false
+        type: string
+        default: "targeted"
+        description: "off | minimal | targeted | complete. 'complete' floods pre-Swift-6 code."
+
+      # ---- test tuning ----
+      test_destination:
+        required: false
+        type: string
+        default: ""
+        description: >-
+          xcodebuild -destination. Auto-resolved to the newest available iPhone
+          simulator (pinned by UDID) when empty.
+
+      test_plan:
+        required: false
+        type: string
+        default: ""
+        description: "Optional -testPlan name."
+
+      coverage_include_targets:
+        required: false
+        type: string
+        default: ""
+        description: "Regex of coverage targets to include. Empty means all non-test targets."
+
+      coverage_exclude_targets:
+        required: false
+        type: string
+        default: "([Tt]ests?|UITests|Mock|Fixture)"
+        description: "Regex of coverage targets to exclude."
+
+      # ---- gates ----
+      fail_on_lint:
+        required: false
+        type: boolean
+        default: true
+
+      fail_on_formatting:
+        required: false
+        type: boolean
+        default: true
+
+      fail_on_security:
+        required: false
+        type: boolean
+        default: true
+        description: "Fail on Semgrep ERROR findings and leaked secrets."
+
+      fail_on_vulnerabilities:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Fail on HIGH/CRITICAL CVEs in dependencies. Off by default: a first
+          scan of an existing app almost always has findings.
+
+      fail_on_dead_code:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Fail on unused declarations. Off by default: @objc, storyboards and
+          SwiftUI previews produce false positives until retention is tuned.
+
+      fail_on_clang_analyzer:
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      PIPELINE_TOKEN:
+        required: false
+        description: >-
+          Only required when THIS pipeline repo is private and the caller lives
+          in a different repo. A read-scoped PAT or GitHub App token; without it
+          the checkout of the shared tool configs will fail with 403.
 
     outputs:
       coverage_percent:
-        value: ${{ jobs.ci.outputs.coverage_percent }}
+        description: "Computed xccov LINE coverage percent"
+        value: ${{ jobs.test.outputs.coverage_percent }}
+
+      scheme:
+        description: "The Xcode scheme that was built"
+        value: ${{ jobs.test.outputs.scheme }}
+
+env:
+  # Tool versions, consumed by the setup action's installer. Bump them here.
+  SWIFTLINT_VERSION: "0.57.0"
+  SWIFTFORMAT_VERSION: "0.55.5"
+  PERIPHERY_VERSION: "3.0.0"
+  XCBEAUTIFY_VERSION: "2.16.0"
+  GITLEAKS_VERSION: "8.21.2"
+  TRIVY_VERSION: "0.58.1"
 
 defaults:
   run:
     shell: bash
 
-jobs:
-  ci:
-    runs-on: macos-latest
+permissions:
+  contents: read
 
-    outputs:
-      coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
+concurrency:
+  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # =========================================================================
+  # 1. LINT + FORMAT  (the pylint + black equivalent)
+  #    No Xcode build required -- both tools parse source directly.
+  # =========================================================================
+  quality:
+    name: Lint & Format
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_static_analysis || inputs.run_formatting }}
 
     steps:
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Detect workspace or project
-      # --------------------------------------------------
+      - name: Setup iOS build environment
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/setup-ios@main
+        with:
+          xcode_version: ${{ inputs.xcode_version }}
+          workspace: ${{ inputs.workspace }}
+          project: ${{ inputs.project }}
+          scheme: ${{ inputs.scheme }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          tools: swiftlint swiftformat
+          resolve_dependencies: "false"
+          cache_key_suffix: quality
 
-      - name: Detect Xcode Workspace / Project
-        id: detect
+      # -------------------------------------------------------------------
+      # Formatting gate. `swiftformat .` is the local fix.
+      # -------------------------------------------------------------------
+      - name: Format check (SwiftFormat)
+        if: ${{ inputs.run_formatting }}
+        continue-on-error: ${{ !inputs.fail_on_formatting }}
         run: |
-          set -e
+          set -euo pipefail
+          mkdir -p build/reports
 
-          if [ -n "${{ inputs.workspace }}" ] && [ -d "${{ inputs.workspace }}" ]; then
-            echo "type=workspace" >> $GITHUB_OUTPUT
-            echo "file=${{ inputs.workspace }}" >> $GITHUB_OUTPUT
-            exit 0
+          CONFIG=".pipeline/.github/tool/.swiftformat"
+          if [ -f ".swiftformat" ]; then
+            echo "Using the caller repo's own .swiftformat"
+            CONFIG=".swiftformat"
           fi
 
-          if [ -n "${{ inputs.project }}" ] && [ -d "${{ inputs.project }}" ]; then
-            echo "type=project" >> $GITHUB_OUTPUT
-            echo "file=${{ inputs.project }}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          swiftformat --lint --config "$CONFIG" --reporter github-actions-log . \
+            2>&1 | tee build/reports/swiftformat.log
 
-          WORKSPACE=$(find . -name "*.xcworkspace" | head -n 1 || true)
+          COUNT=$(grep -c '::warning\|::error' build/reports/swiftformat.log 2>/dev/null || true)
+          echo "SwiftFormat: ${COUNT:-0} file(s) would be reformatted" | tee build/reports/swiftformat-summary.txt
 
-          if [ -n "$WORKSPACE" ]; then
-            echo "type=workspace" >> $GITHUB_OUTPUT
-            echo "file=$WORKSPACE" >> $GITHUB_OUTPUT
-            echo "Detected workspace: $WORKSPACE"
-            exit 0
-          fi
+      - name: Formatting hint on failure
+        if: ${{ failure() && inputs.run_formatting }}
+        run: echo "::notice::Run 'swiftformat .' locally to fix formatting."
 
-          PROJECT=$(find . -name "*.xcodeproj" | head -n 1 || true)
-
-          if [ -n "$PROJECT" ]; then
-            echo "type=project" >> $GITHUB_OUTPUT
-            echo "file=$PROJECT" >> $GITHUB_OUTPUT
-            echo "Detected project: $PROJECT"
-            exit 0
-          fi
-
-          echo "❌ No workspace or project found"
-          exit 1
-
-      # Optional Xcode version
-      - name: Select Xcode
-        if: ${{ inputs.xcode_version != 'latest-stable' }}
-        run: |
-          sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode_version }}.app/Contents/Developer"
-          xcodebuild -version
-
-      # --------------------------------------------------
-      # Resolve dependencies
-      # --------------------------------------------------
-
-      - name: Resolve Dependencies
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -${{ steps.detect.outputs.type }} "${{ steps.detect.outputs.file }}" \
-            -scheme "${{ inputs.scheme }}" || true
-
-      # --------------------------------------------------
-      # Static analysis
-      # --------------------------------------------------
-
-      - name: Static Analysis
+      # -------------------------------------------------------------------
+      # SwiftLint. This replaces the previous "Static analysis placeholder"
+      # echo statement, which never ran anything.
+      # -------------------------------------------------------------------
+      - name: Lint (SwiftLint)
         if: ${{ inputs.run_static_analysis }}
+        continue-on-error: ${{ !inputs.fail_on_lint }}
         run: |
-          echo "Static analysis placeholder"
-          echo "Add SwiftLint / Sonar here"
+          set -euo pipefail
+          mkdir -p build/reports
 
-      # --------------------------------------------------
-      # Tests
-      # --------------------------------------------------
+          CONFIG=".pipeline/.github/tool/.swiftlint.yml"
+          if [ -f ".swiftlint.yml" ]; then
+            echo "Using the caller repo's own .swiftlint.yml"
+            CONFIG=".swiftlint.yml"
+          fi
 
-      - name: Run Unit Tests
-        if: ${{ inputs.run_tests }}
+          # Two passes: a machine-readable report for the summary, then the
+          # gating pass. --strict promotes warnings to errors.
+          swiftlint lint --config "$CONFIG" --reporter json > build/reports/swiftlint.json || true
+          swiftlint lint --config "$CONFIG" --reporter github-actions-logging --strict
+
+      - name: Summarise lint findings
+        if: ${{ always() && inputs.run_static_analysis }}
+        run: |
+          set -euo pipefail
+          bash .pipeline/.github/tool/scripts/lint_summary.sh build/reports/swiftlint.json \
+            | tee build/reports/swiftlint-summary.txt
+
+      - name: Upload lint & format reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-lint-format
+          path: build/reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # 2. SECURITY  (the bandit equivalent)
+  #    Runs on Linux: none of these tools need Xcode, and macOS costs 10x.
+  # =========================================================================
+  security:
+    name: Security Scan
+    runs-on: ${{ inputs.security_runner }}
+    if: ${{ inputs.run_security || inputs.run_dependency_audit }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks scans history, not just the worktree
+
+      - name: Checkout pipeline configs
+        uses: actions/checkout@v4
+        with:
+          repository: Rite-Technologies-23/ops-rite-ios-pipeline
+          path: .pipeline
+          token: ${{ secrets.PIPELINE_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Install security tools
+        run: |
+          set -euo pipefail
+          BIN="${RUNNER_TEMP}/ci-tools"
+          mkdir -p "$BIN"
+          echo "$BIN" >> "$GITHUB_PATH"
+
+          if [ "${{ inputs.run_security }}" = "true" ]; then
+            curl -sSLo /tmp/gitleaks.tar.gz \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            tar -xzf /tmp/gitleaks.tar.gz -C "$BIN" gitleaks
+            chmod +x "$BIN/gitleaks"
+          fi
+
+          if [ "${{ inputs.run_dependency_audit }}" = "true" ]; then
+            curl -sSLo /tmp/trivy.tar.gz \
+              "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+            tar -xzf /tmp/trivy.tar.gz -C "$BIN" trivy
+            chmod +x "$BIN/trivy"
+          fi
+
+      # -------------------------------------------------------------------
+      # 2a. Secret scanning
+      # -------------------------------------------------------------------
+      - name: Scan for committed secrets
+        if: ${{ inputs.run_security }}
+        continue-on-error: ${{ !inputs.fail_on_security }}
+        run: |
+          set -euo pipefail
+          gitleaks detect \
+            --source . \
+            --config .pipeline/.github/tool/gitleaks.toml \
+            --report-format sarif \
+            --report-path gitleaks.sarif \
+            --redact \
+            --exit-code 1 \
+            --verbose
+
+      # -------------------------------------------------------------------
+      # 2b. SAST -- Semgrep OSS. Swift support is GA; registry packs are free
+      #     and need no token.
+      # -------------------------------------------------------------------
+      - name: Set up Python
+        if: ${{ inputs.run_security }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        if: ${{ inputs.run_security }}
+        run: python -m pip install --quiet --disable-pip-version-check semgrep
+
+      - name: Run Semgrep (SAST)
+        if: ${{ inputs.run_security }}
         run: |
           set -euo pipefail
 
-          RESULT_BUNDLE="$RUNNER_TEMP/TestResults.xcresult"
-          echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
+          # Never fail here -- the gate step below decides, so that a registry
+          # outage cannot be mistaken for a security finding.
+          semgrep scan \
+            --config r/swift \
+            --config p/secrets \
+            --config .pipeline/.github/tool/semgrep/ios-rules.yml \
+            --exclude 'Pods' \
+            --exclude 'Carthage' \
+            --exclude '.build' \
+            --exclude '.pipeline' \
+            --exclude 'DerivedData' \
+            --metrics=off \
+            --json --output semgrep.json \
+            --no-error || true
 
-          xcodebuild test \
-            -${{ steps.detect.outputs.type }} "${{ steps.detect.outputs.file }}" \
-            -scheme "${{ inputs.scheme }}" \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
-            -resultBundlePath "$RESULT_BUNDLE" \
-            -enableCodeCoverage YES \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            | xcpretty
+          test -f semgrep.json || echo '{"results":[],"errors":[]}' > semgrep.json
 
-      # --------------------------------------------------
-      # Coverage
-      # --------------------------------------------------
-
-      - name: Compute Coverage + Gate
-        id: coverage
-        if: ${{ inputs.run_tests && inputs.run_coverage }}
+      - name: Gate on Semgrep ERROR findings
+        if: ${{ inputs.run_security }}
+        continue-on-error: ${{ !inputs.fail_on_security }}
         run: |
           set -euo pipefail
 
-          TH="${{ inputs.coverage_threshold }}"
-          RESULT="${RESULT_BUNDLE:-}"
+          ERRORS=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep.json)
+          WARNS=$(jq  '[.results[] | select(.extra.severity == "WARNING")] | length' semgrep.json)
 
-          if [ -z "$RESULT" ] || [ ! -d "$RESULT" ]; then
-            echo "❌ xcresult not found"
+          echo "Semgrep: ${ERRORS} error(s), ${WARNS} warning(s)"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            jq -r '.results[] | select(.extra.severity == "ERROR")
+                   | "::error file=\(.path),line=\(.start.line)::[\(.check_id)] \(.extra.message | gsub("\n"; " "))"' \
+                   semgrep.json
             exit 1
           fi
 
-          echo "Coverage targets:"
-          xcrun xccov view --report "$RESULT"
+      # -------------------------------------------------------------------
+      # 2c. Dependency CVEs.
+      #     Easier than Android: Package.resolved and Podfile.lock are real
+      #     lockfiles, so Trivy reads them directly -- no SBOM step needed.
+      # -------------------------------------------------------------------
+      - name: Scan dependencies for known CVEs
+        if: ${{ inputs.run_dependency_audit }}
+        continue-on-error: ${{ !inputs.fail_on_vulnerabilities }}
+        run: |
+          set -euo pipefail
 
-          APP_NAME="${{ inputs.scheme }}.app"
+          if ! find . -name 'Package.resolved' -o -name 'Podfile.lock' | grep -q .; then
+            echo "::warning::No Package.resolved or Podfile.lock found -- nothing to audit."
+            echo '{"Results":[]}' > trivy.json
+            exit 0
+          fi
 
-          LINE=$(xcrun xccov view --report "$RESULT" | grep "$APP_NAME" | head -n 1 || true)
+          trivy fs . \
+            --scanners vuln \
+            --skip-dirs .pipeline,DerivedData,.build \
+            --format json --output trivy.json \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --exit-code 0
 
-          if [ -z "$LINE" ]; then
-            echo "❌ Could not find coverage line"
+          trivy fs . \
+            --scanners vuln \
+            --skip-dirs .pipeline,DerivedData,.build \
+            --format table \
+            --severity HIGH,CRITICAL \
+            --exit-code 0
+
+          COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+          echo "Trivy: ${COUNT} HIGH/CRITICAL vulnerabilities"
+
+          if [ "$COUNT" -gt 0 ]; then
             exit 1
           fi
 
-          PCT=$(echo "$LINE" | awk '{print $(NF-1)}' | tr -d '%')
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-security
+          path: |
+            semgrep.json
+            gitleaks.sarif
+            trivy.json
+          if-no-files-found: ignore
+          retention-days: 30
 
-          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-          echo "Coverage: ${PCT}%"
+  # =========================================================================
+  # 3. DEAD CODE  (the vulture equivalent)
+  #    Periphery indexes the whole project, so it must compile.
+  # =========================================================================
+  dead_code:
+    name: Dead Code Analysis
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_dead_code }}
 
-          if awk -v th="$TH" 'BEGIN{exit !(th+0>0)}'; then
-            PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-            if [ "$PASS" -ne 1 ]; then
-              echo "❌ Coverage below threshold"
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup iOS build environment
+        id: setup
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/setup-ios@main
+        with:
+          xcode_version: ${{ inputs.xcode_version }}
+          workspace: ${{ inputs.workspace }}
+          project: ${{ inputs.project }}
+          scheme: ${{ inputs.scheme }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          tools: periphery
+          cache_derived_data: "true"
+          cache_key_suffix: deadcode
+
+      - name: Stage Periphery config
+        run: |
+          set -euo pipefail
+          if [ ! -f ".periphery.yml" ]; then
+            cp .pipeline/.github/tool/.periphery.yml ./.periphery.yml
+            echo "Using the pipeline's shared Periphery config"
+          else
+            echo "Using the caller repo's own .periphery.yml"
+          fi
+
+      - name: Scan for unused declarations (Periphery)
+        continue-on-error: ${{ !inputs.fail_on_dead_code }}
+        env:
+          PROJECT_TYPE: ${{ steps.setup.outputs.project_type }}
+          PROJECT_FILE: ${{ steps.setup.outputs.project_file }}
+          SCHEME: ${{ steps.setup.outputs.scheme }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/reports
+
+          # Periphery drives xcodebuild itself and only understands --project,
+          # so a workspace-based repo is pointed at the project inside it.
+          PROJ="$PROJECT_FILE"
+          if [ "$PROJECT_TYPE" = "workspace" ]; then
+            PROJ=$(find . -name '*.xcodeproj' \
+                     -not -path '*/Pods/*' \
+                     -not -path '*/.build/*' \
+                     -not -path '*/.pipeline/*' \
+                     -not -path '*/SourcePackages/*' 2>/dev/null | head -1 || true)
+            if [ -z "$PROJ" ]; then
+              echo "::error::Periphery needs an .xcodeproj; none found alongside $PROJECT_FILE"
               exit 1
             fi
           fi
 
-      # --------------------------------------------------
-      # Archive
-      # --------------------------------------------------
+          echo "Periphery scanning $PROJ (scheme $SCHEME)"
 
-      - name: Build Unsigned Archive
-        if: ${{ inputs.build_archive }}
+          periphery scan \
+            --project "$PROJ" \
+            --schemes "$SCHEME" \
+            --format json \
+            --disable-update-check \
+            --quiet > build/reports/periphery.json || true
+
+          test -s build/reports/periphery.json || echo '[]' > build/reports/periphery.json
+
+          COUNT=$(jq 'length' build/reports/periphery.json)
+          echo "Periphery found ${COUNT} unused declaration(s)"
+
+          if [ "${{ inputs.fail_on_dead_code }}" = "true" ] && [ "$COUNT" -gt 0 ]; then
+            jq -r '.[] | "::warning file=\(.location // "?" | split(":")[0]),line=\(.location // "0:0:0" | split(":")[1])::Unused \(.kind // "declaration"): \(.name // "?")"' \
+              build/reports/periphery.json || true
+            exit 1
+          fi
+
+      - name: Summarise dead-code findings
+        if: always()
         run: |
           set -euo pipefail
+          bash .pipeline/.github/tool/scripts/periphery_summary.sh build/reports/periphery.json \
+            | tee build/reports/periphery-summary.txt
 
-          mkdir -p release
+      - name: Upload dead-code reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-dead-code
+          path: build/reports/
+          if-no-files-found: ignore
+          retention-days: 14
 
-          ARCHIVE_PATH="release/ios-archive-unsigned.xcarchive"
-          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
+  # =========================================================================
+  # 4. CLANG STATIC ANALYZER  (opt-in: a fourth full compile on a 10x runner)
+  # =========================================================================
+  analyze:
+    name: Clang Static Analyzer
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_clang_analyzer }}
 
-          xcodebuild archive \
-            -${{ steps.detect.outputs.type }} "${{ steps.detect.outputs.file }}" \
-            -scheme "${{ inputs.scheme }}" \
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup iOS build environment
+        id: setup
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/setup-ios@main
+        with:
+          xcode_version: ${{ inputs.xcode_version }}
+          workspace: ${{ inputs.workspace }}
+          project: ${{ inputs.project }}
+          scheme: ${{ inputs.scheme }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          tools: xcbeautify
+          cache_derived_data: "true"
+          cache_key_suffix: analyze
+
+      - name: Run xcodebuild analyze
+        continue-on-error: ${{ !inputs.fail_on_clang_analyzer }}
+        env:
+          SWIFT_WARNINGS_AS_ERRORS: ${{ inputs.swift_warnings_as_errors }}
+          SWIFT_STRICT_CONCURRENCY: ${{ inputs.swift_strict_concurrency }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/reports build/analyzer
+
+          mapfile -t STRICT < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
+
+          set -o pipefail
+          xcodebuild analyze \
+            -"${{ steps.setup.outputs.project_type }}" "${{ steps.setup.outputs.project_file }}" \
+            -scheme "${{ steps.setup.outputs.scheme }}" \
             -configuration "${{ inputs.configuration }}" \
             -destination "generic/platform=iOS" \
-            -archivePath "$ARCHIVE_PATH" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            | xcpretty
+            CLANG_ANALYZER_OUTPUT=plist-html \
+            CLANG_ANALYZER_OUTPUT_DIR="$PWD/build/analyzer" \
+            "${STRICT[@]}" \
+            | xcbeautify
 
-      # --------------------------------------------------
-      # Artifacts
-      # --------------------------------------------------
+      - name: Summarise analyzer findings
+        if: always()
+        run: |
+          set -euo pipefail
+          COUNT=$(find build/analyzer -name '*.plist' 2>/dev/null | wc -l | tr -d ' ')
+          echo "Clang analyzer: ${COUNT} finding(s)" | tee build/reports/analyze-summary.txt
 
-      - name: Upload Test Results
-        if: ${{ always() && inputs.run_tests }}
+          if [ "${{ inputs.fail_on_clang_analyzer }}" = "true" ] && [ "${COUNT:-0}" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload analyzer reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-analyzer
+          path: |
+            build/reports/
+            build/analyzer/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # 5. TESTS + COVERAGE
+  # =========================================================================
+  test:
+    name: Unit Tests & Coverage
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_tests }}
+
+    outputs:
+      coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
+      scheme: ${{ steps.setup.outputs.scheme }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup iOS build environment
+        id: setup
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/setup-ios@main
+        with:
+          xcode_version: ${{ inputs.xcode_version }}
+          workspace: ${{ inputs.workspace }}
+          project: ${{ inputs.project }}
+          scheme: ${{ inputs.scheme }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          tools: xcbeautify
+          cache_derived_data: "true"
+          cache_key_suffix: test
+
+      # A hardcoded simulator name breaks on every runner-image bump.
+      - name: Resolve simulator destination
+        id: destination
+        run: bash .pipeline/.github/tool/scripts/resolve_destination.sh "${{ inputs.test_destination }}"
+
+      - name: Run Unit Tests
+        env:
+          SWIFT_WARNINGS_AS_ERRORS: ${{ inputs.swift_warnings_as_errors }}
+          SWIFT_STRICT_CONCURRENCY: ${{ inputs.swift_strict_concurrency }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/reports
+
+          RESULT_BUNDLE="$RUNNER_TEMP/TestResults.xcresult"
+          echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> "$GITHUB_ENV"
+          rm -rf "$RESULT_BUNDLE"
+
+          mapfile -t STRICT < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
+
+          EXTRA=()
+          if [ -n "${{ inputs.test_plan }}" ]; then
+            EXTRA+=("-testPlan" "${{ inputs.test_plan }}")
+          fi
+
+          # pipefail matters: without it xcbeautify's exit code masks a failing
+          # xcodebuild and the job goes green on failing tests.
+          set -o pipefail
+          xcodebuild test \
+            -"${{ steps.setup.outputs.project_type }}" "${{ steps.setup.outputs.project_file }}" \
+            -scheme "${{ steps.setup.outputs.scheme }}" \
+            -destination "${{ steps.destination.outputs.destination }}" \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -enableCodeCoverage YES \
+            "${EXTRA[@]}" \
+            "${STRICT[@]}" \
+            | xcbeautify --report junit --report-path build/reports
+
+      - name: Compute coverage and gate
+        id: coverage
+        if: ${{ inputs.run_coverage }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/reports
+
+          bash .pipeline/.github/tool/scripts/coverage_summary.sh \
+            --result "$RESULT_BUNDLE" \
+            --threshold "${{ inputs.coverage_threshold }}" \
+            --include-pattern "${{ inputs.coverage_include_targets }}" \
+            --exclude-pattern "${{ inputs.coverage_exclude_targets }}" \
+            | tee build/reports/coverage-summary.txt
+
+      - name: Summarise test results
+        if: always()
+        run: |
+          set -euo pipefail
+          bash .pipeline/.github/tool/scripts/junit_summary.sh build/reports \
+            | tee build/reports/test-summary.txt
+
+      - name: Upload test results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-test-results
-          path: ${{ env.RESULT_BUNDLE }}
+          path: |
+            ${{ runner.temp }}/TestResults.xcresult
+            build/reports/
+          if-no-files-found: ignore
+          retention-days: 14
 
-      - name: Prepare Archive
-        if: ${{ inputs.build_archive }}
+  # =========================================================================
+  # 6. ARCHIVE  (artifact contract consumed by release.yml)
+  # =========================================================================
+  build:
+    name: Build Unsigned Archive
+    runs-on: ${{ inputs.runner }}
+    needs: [test]
+    if: ${{ always() && inputs.build_archive && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup iOS build environment
+        id: setup
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/setup-ios@main
+        with:
+          xcode_version: ${{ inputs.xcode_version }}
+          workspace: ${{ inputs.workspace }}
+          project: ${{ inputs.project }}
+          scheme: ${{ inputs.scheme }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          tools: xcbeautify
+          cache_derived_data: "true"
+          cache_key_suffix: archive
+
+      - name: Build Unsigned Archive
+        env:
+          SWIFT_WARNINGS_AS_ERRORS: ${{ inputs.swift_warnings_as_errors }}
+          SWIFT_STRICT_CONCURRENCY: ${{ inputs.swift_strict_concurrency }}
         run: |
+          set -euo pipefail
           mkdir -p artifact
-          mv release/ios-archive-unsigned.xcarchive artifact/
 
+          ARCHIVE_PATH="artifact/ios-archive-unsigned.xcarchive"
+
+          mapfile -t STRICT < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
+
+          set -o pipefail
+          xcodebuild archive \
+            -"${{ steps.setup.outputs.project_type }}" "${{ steps.setup.outputs.project_file }}" \
+            -scheme "${{ steps.setup.outputs.scheme }}" \
+            -configuration "${{ inputs.configuration }}" \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            "${STRICT[@]}" \
+            | xcbeautify
+
+          echo "Archive contents:"
+          ls -la "$ARCHIVE_PATH"
+
+      # Artifact name is a contract with release.yml -- do not rename.
       - name: Upload Archive
-        if: ${{ inputs.build_archive }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-archive-unsigned
           path: artifact
+          if-no-files-found: warn
+          retention-days: 14
+
+  # =========================================================================
+  # 7. SUMMARY
+  # =========================================================================
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [quality, security, dead_code, analyze, test, build]
+    if: ${{ always() }}
+
+    steps:
+
+      - name: Checkout pipeline scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Rite-Technologies-23/ops-rite-ios-pipeline
+          path: .pipeline
+          token: ${{ secrets.PIPELINE_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Download all reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+
+      - name: Compose job summary
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          DEAD_CODE_RESULT: ${{ needs.dead_code.result }}
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          COVERAGE_PERCENT: ${{ needs.test.outputs.coverage_percent }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+        run: bash .pipeline/.github/tool/scripts/generate_summary_md.sh reports

@@ -1,0 +1,66 @@
+# Shared SwiftFormat configuration -- the "black" of this pipeline.
+#
+#   swiftformat --lint .   -> CI gate, fails on any difference
+#   swiftformat .          -> local fix
+#
+# A caller repo that commits its own .swiftformat at the repo root takes
+# precedence. Rules here are deliberately close to SwiftFormat's defaults:
+# an opinionated formatter is only useful if nobody argues with it.
+
+--swiftversion 5.9
+
+# ---- exclusions ----
+--exclude .build,.pipeline,Pods,Carthage,DerivedData,fastlane,**/Generated,**/*.generated.swift,**/*.pb.swift
+
+# ---- layout ----
+--indent 4
+--tabwidth 4
+--maxwidth 140
+--linebreaks lf
+--semicolons never
+--commas always
+--trimwhitespace always
+--emptybraces no-space
+
+# ---- wrapping ----
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--wrapconditions after-first
+--wrapreturntype if-multiline
+--closingparen balanced
+--funcattributes prev-line
+--typeattributes prev-line
+--varattributes same-line
+
+# ---- self / redundancy ----
+--self remove
+--selfrequired
+--stripunusedargs closure-only
+--importgrouping testable-bottom
+
+# ---- headers ----
+--header ignore
+
+# ---- explicit rule toggles ----
+# Enabled beyond the defaults:
+--enable isEmpty
+--enable redundantType
+--enable sortImports
+--enable blankLinesBetweenScopes
+--enable consecutiveBlankLines
+--enable duplicateImports
+--enable redundantParens
+--enable redundantReturn
+--enable redundantSelf
+--enable spaceAroundOperators
+--enable trailingClosures
+--enable wrapMultilineStatementBraces
+
+# Disabled: these fight with SwiftUI's trailing-closure-heavy view builders
+# or produce churn without improving readability.
+--disable andOperator
+--disable wrapEnumCases
+--disable organizeDeclarations
+--disable extensionAccessControl
+--disable markTypes

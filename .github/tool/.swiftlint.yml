@@ -1,0 +1,204 @@
+# Shared SwiftLint configuration -- the pylint of this pipeline.
+#
+# Applied by the Lint & Format CI stage. A caller repo that commits its own
+# .swiftlint.yml at the repo root takes precedence.
+#
+# SwiftLint has two rule tiers:
+#   - default rules        run everywhere
+#   - opt_in_rules         must be listed explicitly (most of the good ones)
+#   - analyzer rules       need compiler logs; run separately via
+#                          `swiftlint analyze` in the dead-code stage
+
+included:
+  - Sources
+  - Source
+  - App
+  - Shared
+  - Modules
+  - Features
+
+excluded:
+  - .build
+  - .pipeline
+  - Pods
+  - Carthage
+  - DerivedData
+  - fastlane
+  - "**/*.generated.swift"
+  - "**/Generated"
+  - "**/*.pb.swift"
+
+# ---------------------------------------------------------------------------
+# Opt-in rules. Grouped by what they buy you.
+# ---------------------------------------------------------------------------
+opt_in_rules:
+  # --- dead code (file-local scope; Periphery does the cross-module work) ---
+  - unused_import
+  - unused_declaration
+  - redundant_optional_initialization
+  - redundant_type_annotation
+  - unneeded_parentheses_in_closure_argument
+
+  # --- correctness / crash risk ---
+  - force_unwrapping
+  - force_try
+  - implicitly_unwrapped_optional
+  - empty_count
+  - empty_string
+  - fatal_error_message
+  - overridden_super_call
+  - prohibited_super_call
+  - private_action
+  - private_outlet
+  - discarded_notification_center_observer
+  - unowned_variable_capture
+  - weak_delegate
+  - strong_iboutlet
+
+  # --- concurrency / memory ---
+  - capture_variable
+  - unavailable_function
+
+  # --- clarity ---
+  - closure_end_indentation
+  - closure_spacing
+  - collection_alignment
+  - contains_over_filter_count
+  - contains_over_first_not_nil
+  - convenience_type
+  - empty_collection_literal
+  - explicit_init
+  - fallthrough
+  - first_where
+  - flatmap_over_map_reduce
+  - identical_operands
+  - joined_default_parameter
+  - last_where
+  - legacy_multiple
+  - literal_expression_end_indentation
+  - lower_acl_than_parent
+  - modifier_order
+  - multiline_arguments
+  - multiline_parameters
+  - operator_usage_whitespace
+  - prefer_self_type_over_type_of_self
+  - reduce_into
+  - redundant_nil_coalescing
+  - sorted_first_last
+  - toggle_bool
+  - unneeded_break_in_switch
+  - vertical_parameter_alignment_on_call
+  - yoda_condition
+
+disabled_rules:
+  # SwiftFormat owns whitespace and line breaks -- having both tools police
+  # formatting produces contradictory fix-ups.
+  - trailing_whitespace
+  - vertical_whitespace
+  - opening_brace
+  - statement_position
+  - todo   # ForbiddenComment equivalent is handled by custom_rules below
+
+# ---------------------------------------------------------------------------
+# Thresholds. Warnings are informational; errors fail the build under --strict.
+# ---------------------------------------------------------------------------
+line_length:
+  warning: 140
+  error: 200
+  ignores_comments: true
+  ignores_urls: true
+  ignores_function_declarations: false
+
+function_body_length:
+  warning: 80
+  error: 150
+
+type_body_length:
+  warning: 400
+  error: 600
+
+file_length:
+  warning: 600
+  error: 1000
+  ignore_comment_only_lines: true
+
+cyclomatic_complexity:
+  warning: 12
+  error: 20
+  ignores_case_statements: true
+
+function_parameter_count:
+  warning: 8
+  error: 12
+
+nesting:
+  type_level:
+    warning: 3
+  function_level:
+    warning: 4
+
+large_tuple:
+  warning: 3
+  error: 4
+
+identifier_name:
+  min_length:
+    warning: 2
+    error: 1
+  max_length:
+    warning: 50
+    error: 60
+  excluded:
+    - id
+    - x
+    - y
+    - z
+    - to
+    - up
+    - vc
+    - db
+
+type_name:
+  min_length: 3
+  max_length:
+    warning: 50
+    error: 60
+
+force_unwrapping:
+  severity: warning
+
+implicitly_unwrapped_optional:
+  severity: warning
+
+# ---------------------------------------------------------------------------
+# Custom rules that cover gaps the built-ins leave.
+# ---------------------------------------------------------------------------
+custom_rules:
+  no_print_statements:
+    name: "print() in production code"
+    regex: '(?<!\/\/\s)\bprint\('
+    message: "Use a logger (os.Logger / OSLog), not print(). print output lands in the device console."
+    severity: warning
+    match_kinds:
+      - identifier
+
+  no_stopship:
+    name: "STOPSHIP marker"
+    regex: '(STOPSHIP|FIXME:)'
+    message: "Resolve STOPSHIP/FIXME before merging, or move it to the issue tracker."
+    severity: error
+
+  no_hardcoded_http:
+    name: "Cleartext http:// URL"
+    regex: '"http://(?!localhost|127\.0\.0\.1)'
+    message: "Use https://. ATS blocks cleartext by default and it is trivially interceptable."
+    severity: error
+
+  no_uikit_in_viewmodel:
+    name: "UIKit imported into a ViewModel"
+    regex: 'import UIKit'
+    included: ".*ViewModel\\.swift"
+    message: "ViewModels should not depend on UIKit -- it makes them untestable off-device."
+    severity: warning
+
+reporter: "xcode"

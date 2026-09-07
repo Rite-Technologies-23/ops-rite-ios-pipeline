@@ -1,0 +1,67 @@
+# gitleaks configuration for iOS pipelines.
+# Extends the upstream default rule set and adds iOS-specific rules and
+# allowlists so the scan does not drown in false positives from build output,
+# asset catalogs and provisioning artifacts.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for iOS build output and binary assets"
+
+paths = [
+  '''.*/\.build/.*''',
+  '''.*/Pods/.*''',
+  '''.*/Carthage/.*''',
+  '''.*/DerivedData/.*''',
+  '''.*/\.pipeline/.*''',
+  '''.*\.(png|jpg|jpeg|webp|gif|svg|pdf|ttf|otf|car|nib|storyboardc|ipa|dSYM|xcarchive)$''',
+  '''.*\.xcassets/.*''',
+  '''.*/Package\.resolved$''',
+  '''.*\.generated\.swift$''',
+]
+
+regexes = [
+  # Placeholder values used in templates and sample configs.
+  '''(?i)(your|example|sample|dummy|placeholder|changeme|xxxx)[-_]?(key|token|secret|password)''',
+  # Apple's own sample bundle identifiers.
+  '''com\.example\..*''',
+]
+
+[[rules]]
+id = "ios-appstore-connect-private-key"
+description = "App Store Connect API private key (.p8) committed in source"
+regex = '''-----BEGIN PRIVATE KEY-----[\s\S]{100,}?-----END PRIVATE KEY-----'''
+tags = ["key", "apple", "ios"]
+
+[[rules]]
+id = "ios-provisioning-profile-inline"
+description = "Provisioning profile embedded in source or config"
+regex = '''(?i)(provisioning_?profile|mobileprovision)["'\s:=]+[A-Za-z0-9+/]{200,}={0,2}'''
+tags = ["apple", "signing", "ios"]
+
+[[rules]]
+id = "ios-p12-password"
+description = "Certificate or keychain password hardcoded"
+regex = '''(?i)(p12_?password|cert_?password|keychain_?password|CODE_SIGN_IDENTITY)\s*[=:]\s*["'][^"'$\n]{3,}["']'''
+tags = ["apple", "signing", "ios"]
+
+[[rules]]
+id = "ios-firebase-plist-api-key"
+description = "Google/Firebase API key in a plist or Swift source"
+regex = '''AIza[0-9A-Za-z\-_]{35}'''
+tags = ["key", "google", "firebase", "ios"]
+
+[[rules]]
+id = "ios-hardcoded-api-key-swift"
+description = "API key or token assigned to a Swift constant"
+regex = '''(?i)(let|var)\s+\w*(api_?key|auth_?token|access_?token|secret_?key|client_?secret)\w*\s*(:\s*String\s*)?=\s*"[A-Za-z0-9_\-]{16,}"'''
+path = '''.*\.swift$'''
+tags = ["key", "ios"]
+
+[[rules]]
+id = "ios-keychain-shared-secret"
+description = "Shared secret in an Info.plist or xcconfig"
+regex = '''(?i)<key>[^<]*(secret|apikey|api_key|token|password)[^<]*</key>\s*<string>[^<]{8,}</string>'''
+path = '''.*\.plist$'''
+tags = ["ios", "plist"]

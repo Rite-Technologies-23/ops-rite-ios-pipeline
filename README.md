@@ -6,10 +6,31 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for native iOS appli
 
 ## ✨ Features
 
-- Swift Package dependency resolution
-- Xcode unit tests with code coverage
-- Coverage threshold enforcement
-- iOS XCArchive build (unsigned)
+### CI — complete quality gate, built entirely from free tooling
+
+| Concern | Tool | Gate |
+|---|---|---|
+| **Security (SAST)** | **Semgrep OSS** (`r/swift`, `p/secrets` + 16 custom iOS rules: insecure storage, broken TLS, weak crypto, pasteboard/log leakage, WebView bridges) | fails on ERROR |
+| **Secret scanning** | **gitleaks** (binary — no org licence needed), with iOS rules for `.p8` keys, provisioning profiles and signing passwords | fails on any leak |
+| **Dependency CVEs** | **Trivy** over `Package.resolved` / `Podfile.lock` | report-only by default |
+| **Clang analyzer** | `xcodebuild analyze` | opt-in |
+| **Dead code** | **Periphery** (whole-project unused declarations) + SwiftLint `unused_declaration` / `unused_import` | report-only by default |
+| **Static typing** | `swiftc` with strict concurrency + optional warnings-as-errors | fails on type error |
+| **Lint** | **SwiftLint** `--strict` with a shared 60-rule config | fails on any issue |
+| **Formatting** | **SwiftFormat** `--lint` | fails on diff |
+| **Tests** | `xcodebuild test` via xcbeautify (JUnit report) | fails on any failure |
+| **Coverage** | **xccov**, target-filtered, with a line threshold | fails below threshold |
+
+Compiler strictness is injected through **xcodebuild build-setting overrides**, so a
+caller repository adopts the whole pipeline **without editing its `.xcodeproj` or
+`.xcconfig`**.
+
+### Platform
+
+- Automatic workspace / project / scheme detection
+- Simulator resolved by UDID at run time (no hardcoded device that rots on the next Xcode bump)
+- SPM, CocoaPods and DerivedData caching
+- Parallel CI jobs with an aggregated GitHub job summary
 - Secure certificate and provisioning profile installation
 - IPA export with manual signing
 - Apple TestFlight deployment
@@ -22,9 +43,29 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for native iOS appli
 ## 📦 Repository Structure
 
 ```
-.github/workflows
-├── ios-ci.yml        # Reusable CI workflow
-└── ios-release.yml   # Reusable CD workflow
+.github/
+├── workflows/
+│   ├── push.yml                 # Reusable iOS CI workflow
+│   └── release.yml              # Reusable iOS CD workflow
+├── actions/setup-ios/           # Shared setup: pipeline checkout, Xcode,
+│   │                            #   project/scheme detection, caching, tools
+│   ├── detect_project.sh
+│   ├── install_tools.sh
+│   └── resolve_dependencies.sh
+└── tool/
+    ├── .swiftlint.yml           # Shared SwiftLint config (lint + unused-code)
+    ├── .swiftformat             # Shared SwiftFormat config
+    ├── .periphery.yml           # Dead-code retention rules
+    ├── gitleaks.toml            # Secret-scanning rules + iOS allowlists
+    ├── semgrep/ios-rules.yml    # Swift/iOS SAST rules
+    └── scripts/                 # Summarisers wired into the job summary
+        ├── coverage_summary.sh
+        ├── junit_summary.sh
+        ├── lint_summary.sh
+        ├── periphery_summary.sh
+        ├── resolve_destination.sh
+        ├── xcodebuild_flags.sh
+        └── generate_summary_md.sh
 ```
 
 ---
@@ -33,27 +74,44 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for native iOS appli
 
 Caller App Repository triggers reusable workflows.
 
-### Reusable CI Workflow (`ios-ci.yml`)
+### Reusable CI Workflow (`push.yml`)
+
+Five independent jobs run in parallel, then archive and summary:
 
 ```
-Checkout repository
-      ↓
-Resolve Swift Package dependencies
-      ↓
-Run Xcode unit tests
-      ↓
-Generate coverage report
-      ↓
-Coverage threshold check
-      ↓
-Build unsigned XCArchive
-      ↓
-Upload test results and archive artifact
+              ┌─ Lint & Format ──── SwiftLint --strict + SwiftFormat --lint
+              │                     (no Xcode build)
+              │
+              ├─ Security ───────── gitleaks + Semgrep + Trivy
+Checkout      │                     (runs on ubuntu — 1x billing)
++ setup-ios ──┤
+(every job)   ├─ Dead Code ──────── Periphery
+              │
+              ├─ Clang Analyzer ─── xcodebuild analyze (opt-in)
+              │
+              └─ Tests & Coverage ─ xcodebuild test + xccov gate
+                                              ↓
+                                    Build unsigned XCArchive
+                                              ↓
+                                    CI Summary (job summary + artifacts)
 ```
 
-### Reusable CD Workflow (`ios-release.yml`)
+Only **Archive** depends on **Tests** — everything else fans out, so a formatting
+failure and a coverage failure surface in the same run rather than one at a time.
+
+### 💰 Runner cost
+
+GitHub bills macOS runners at **10x**. Three stages compile the project (tests,
+dead code, archive); the clang analyzer would be a fourth, which is why it is
+opt-in. The security stage needs no Xcode at all, so it defaults to
+`ubuntu-latest` at 1x — override with `security_runner` if your repo is private
+to a macOS-only runner pool.
+
+### Reusable CD Workflow (`release.yml`)
 
 ```
+Run CI workflow (tests + all quality gates)
+        ↓
 Create GitHub Release
         ↓
 Download unsigned archive
@@ -71,30 +129,124 @@ Upload IPA to GitHub Release
 
 ---
 
-## 🧪 Reusable CI Workflow (`ios-ci.yml`)
-
-### Handles
-
-- Swift Package dependency resolution
-- Xcode unit test execution
-- Coverage report generation
-- Coverage threshold enforcement
-- iOS archive build (unsigned)
-- Upload test results and build artifacts
+## 🧪 Reusable CI Workflow (`push.yml`)
 
 ### Inputs
 
-- `xcode_version`
-- `scheme`
-- `workspace`
-- `project`
-- `configuration`
-- `coverage_threshold`
-- `build_archive`
+#### Project
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `xcode_version` | `latest-stable` | Xcode to select |
+| `scheme` | *auto* | Xcode scheme. Auto-detected from the project when empty |
+| `workspace` | *auto* | Path to `.xcworkspace` |
+| `project` | *auto* | Path to `.xcodeproj` |
+| `configuration` | `Release` | Build configuration |
+| `runner` | `macos-latest` | Runner for the Xcode stages |
+| `security_runner` | `ubuntu-latest` | Runner for the security stage (1x billing) |
+
+#### Stage toggles
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `run_tests` | `true` | `xcodebuild test` |
+| `run_coverage` | `true` | xccov report + threshold gate |
+| `run_static_analysis` | `true` | SwiftLint — **previously a no-op placeholder, now a real gate** |
+| `run_formatting` | `true` | SwiftFormat |
+| `run_security` | `true` | gitleaks + Semgrep |
+| `run_dependency_audit` | `true` | Trivy over the lockfiles |
+| `run_dead_code` | `true` | Periphery |
+| `run_clang_analyzer` | `false` | `xcodebuild analyze` (a 4th compile on a 10x runner) |
+| `build_archive` | `true` | Unsigned `.xcarchive` |
+
+#### Tuning
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `coverage_threshold` | `"0"` | Minimum LINE coverage %. `0` disables the gate |
+| `coverage_include_targets` | `""` | Regex of coverage targets to include |
+| `coverage_exclude_targets` | `([Tt]ests?\|UITests\|Mock\|Fixture)` | Regex of targets to exclude |
+| `test_destination` | *auto* | `-destination`. Auto-resolved to the newest iPhone simulator, pinned by UDID |
+| `test_plan` | `""` | Optional `-testPlan` |
+| `swift_strict_concurrency` | `targeted` | `off` / `minimal` / `targeted` / `complete` |
+| `swift_warnings_as_errors` | `false` | Promote Swift + clang warnings to errors |
+
+#### Gates
+
+Each gate turns its stage from *blocking* into *report-only*. Defaults are chosen
+so a repo adopting the pipeline is not blocked on day one by pre-existing debt.
+
+| Input | Default | Blocks the build? |
+|------|---------|-------------------|
+| `fail_on_lint` | `true` | SwiftLint findings |
+| `fail_on_formatting` | `true` | Formatting differences |
+| `fail_on_security` | `true` | Semgrep ERRORs and leaked secrets |
+| `fail_on_vulnerabilities` | `false` | HIGH/CRITICAL dependency CVEs |
+| `fail_on_dead_code` | `false` | Unused declarations |
+| `fail_on_clang_analyzer` | `false` | Clang analyzer findings |
+
+#### Secrets
+
+| Secret | Required | Description |
+|------|----------|-------------|
+| `PIPELINE_TOKEN` | No | Only when **this** pipeline repo is private and the caller lives in a different repo. The default `GITHUB_TOKEN` is scoped to the caller and will 403 when checking out the shared tool configs. |
 
 ### Outputs
 
-- `coverage_percent`
+| Output | Description |
+|------|-------------|
+| `coverage_percent` | Computed xccov LINE coverage percent |
+| `scheme` | The Xcode scheme that was built |
+
+---
+
+## 📊 Coverage
+
+1. `xcodebuild test -enableCodeCoverage YES` produces an `.xcresult`
+2. `xcrun xccov view --report --json` is parsed with `jq`
+3. Test bundles and `Mock`/`Fixture` targets are filtered out, then covered and
+   executable lines are summed across the remaining targets
+4. The result is compared against `coverage_threshold`
+
+```
+Coverage: 72.86% line (1020/1400 lines across 2 target(s), threshold 70%)
+    MyApp.app: 78% (780/1000)
+    CoreKit.framework: 60% (240/400)
+```
+
+Two deliberate behaviours:
+
+- **The filter refuses to report a figure computed from zero targets.** If your
+  include/exclude patterns match nothing, the stage errors instead of silently
+  reporting `0%` (or, worse, a number taken from the wrong column).
+- **Line coverage only.** `xccov` carries no branch data — unlike JaCoCo on
+  Android, there is no branch-coverage gate to offer here. That is a platform
+  limitation, not an omission.
+
+---
+
+## 🧭 Adoption path
+
+The pipeline is deliberately loud but not immediately blocking on the noisy
+checks. A sensible rollout:
+
+1. **Run it as-is.** Lint, formatting, tests and coverage gate from day one;
+   CVEs and dead code report only.
+2. **Triage the Periphery report.** Tune retention in `.periphery.yml` for your
+   `@objc` surface, storyboards and previews, then set `fail_on_dead_code: true`.
+3. **Triage the CVE report**, then set `fail_on_vulnerabilities: true`.
+4. **Clear the Swift warning backlog**, then set `swift_warnings_as_errors: true`.
+5. **Move `swift_strict_concurrency` to `complete`** when you adopt Swift 6.
+
+To fix formatting locally:
+
+```bash
+swiftformat .
+```
+
+Any config can be overridden per-repo: commit your own `.swiftlint.yml`,
+`.swiftformat` or `.periphery.yml` at the repo root and the pipeline uses it
+instead of the shared one.
 
 ---
 
@@ -116,6 +268,13 @@ Upload IPA to GitHub Release
 - `ios_bundle_id`
 - `enable_whats_new`
 - `whats_new_file`
+- `xcode_version`, `scheme`, `workspace`, `project`, `configuration`,
+  `coverage_threshold` — forwarded to the CI stage
+
+> **Note:** `release.yml` now runs `push.yml` as its first job. Previously it did
+> not, which meant a release could ship without tests ever running, and the
+> `ios-archive-unsigned` artifact it tried to download was never produced in the
+> same workflow run.
 
 ---
 
