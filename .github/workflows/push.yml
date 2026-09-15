@@ -231,7 +231,11 @@ env:
   PERIPHERY_VERSION: "3.0.0"
   XCBEAUTIFY_VERSION: "2.16.0"
   GITLEAKS_VERSION: "8.21.2"
-  TRIVY_VERSION: "0.58.1"
+  # 0.58.1 (the previous pin) no longer has downloadable release assets on
+  # GitHub -- verified 404 on trivy_0.58.1_Linux-64bit.tar.gz as of 2026-09-10
+  # (same finding as the Android pipeline; see its push.yml for the source).
+  TRIVY_VERSION: "0.74.0"
+  SEMGREP_VERSION: "1.165.0"
 
 defaults:
   run:
@@ -410,7 +414,7 @@ jobs:
 
       - name: Install Semgrep
         if: ${{ inputs.run_security }}
-        run: python -m pip install --quiet --disable-pip-version-check semgrep
+        run: python -m pip install --quiet --disable-pip-version-check "semgrep==${SEMGREP_VERSION}"
 
       - name: Run Semgrep (SAST)
         if: ${{ inputs.run_security }}

@@ -208,6 +208,7 @@ jobs:
           cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
 
           echo "✅ Installed provisioning profile UUID: $UUID"
+          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
           security find-identity -p codesigning -v
 
       - name: Generate ExportOptions.plist
@@ -231,7 +232,7 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>${{ inputs.ios_bundle_id }}</key>
-              <string>DevOpsReleaseProfile</string>
+              <string>$PROFILE_UUID</string>
             </dict>
 
             <key>compileBitcode</key>
@@ -247,7 +248,7 @@ jobs:
           ARCHIVE="archive/ios-archive-unsigned.xcarchive"
           if [ ! -d "$ARCHIVE" ]; then
           echo "❌ Archive not found at $ARCHIVE"
-          ls -R release || true
+          ls -R archive || true
           exit 1
           fi
 
@@ -257,10 +258,12 @@ jobs:
             -exportOptionsPlist ExportOptions.plist
 
       - name: Upload signed IPA artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-ipa-signed
           path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: warn
 
   deploy_testflight:
     name: Deploy to TestFlight
