@@ -110,11 +110,9 @@ to a macOS-only runner pool.
 ### Reusable CD Workflow (`release.yml`)
 
 ```
-Run CI workflow (tests + all quality gates)
-        ↓
 Create GitHub Release
         ↓
-Download unsigned archive
+Download unsigned archive (from the caller's own CI job -- see below)
         ↓
 Install signing certificate
         ↓
@@ -126,6 +124,46 @@ Upload to TestFlight
         ↓
 Upload IPA to GitHub Release
 ```
+
+This workflow does **not** run its own CI pass. It consumes the
+`ios-archive-unsigned` artifact the caller's own CI job already built earlier
+in the same workflow run — see "Consolidated CI+CD build" below.
+
+---
+
+## Consolidated CI+CD build
+
+Earlier versions of this pipeline had `release.yml` re-run the entire CI
+workflow itself (tests + all quality gates + archive) before creating the
+release, on top of whatever CI pass the caller's own `push.yml` already ran
+to gate the push. For a release-tag push that meant the exact same
+build (same scheme, same `configuration: "Release"`, same everything) ran
+twice back-to-back for no benefit.
+
+`release.yml` no longer runs a nested CI job. The caller's own `ci` job must
+set `build_archive: true` (as this pipeline's example caller already does on
+every push, not just release tags) so its archive is available; `cd` then
+just downloads that same artifact, signs it, and ships it:
+
+```yaml
+# caller's push.yml
+ci:
+  uses: your-org/ios-reusable/.github/workflows/push.yml@main
+  with:
+    configuration: "Release"
+    build_archive: true
+    # ...
+
+cd:
+  uses: your-org/ios-reusable/.github/workflows/release.yml@main
+  if: contains(github.ref_name, 'release')
+  needs: [ci]
+  with:
+    # ...
+```
+
+No second compile, no second test run — `cd` only does release-specific work
+(GitHub Release, signing, TestFlight upload).
 
 ---
 
@@ -338,9 +376,20 @@ These release notes will automatically be included when uploading builds to **Te
 
 ## 🧩 Example Caller Workflow Usage
 
+`call-cd-workflow` needs `call-ci-workflow` to have already run with
+`build_archive: true` -- see "Consolidated CI+CD build" above.
+
 ```yaml
+call-ci-workflow:
+  uses: your-org/ios-reusable/.github/workflows/push.yml@main
+  with:
+    configuration: "Release"
+    build_archive: true
+    # ...
+
 call-cd-workflow:
   uses: your-org/ios-reusable/.github/workflows/ios-release.yml@main
+  needs: call-ci-workflow
 
   with:
     version: 1.2.0

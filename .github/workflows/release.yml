@@ -26,7 +26,11 @@ on:
         type: string
         default: ""
 
-      # ---- forwarded to the CI stage ----
+      # xcode_version/scheme/workspace/project/configuration/coverage_threshold
+      # are unused inside this workflow -- it no longer runs its own CI pass
+      # (see the removed `ci` job below / the note at `sign_ios`'s artifact
+      # download). Kept for backward compatibility with existing callers that
+      # still pass them; a future major version can drop them.
       xcode_version:
         required: false
         type: string
@@ -76,6 +80,8 @@ on:
       APPSTORE_PRIVATE_KEY:
         required: true
 
+      # Unused (no nested CI pass runs here anymore -- see note near
+      # xcode_version above). Kept for backward compatibility.
       PIPELINE_TOKEN:
         required: false
 
@@ -92,23 +98,8 @@ defaults:
 
 jobs:
 
-  ci:
-    name: iOS CI (Reusable)
-    uses: ./.github/workflows/push.yml
-    with:
-      xcode_version: ${{ inputs.xcode_version }}
-      scheme: ${{ inputs.scheme }}
-      workspace: ${{ inputs.workspace }}
-      project: ${{ inputs.project }}
-      configuration: ${{ inputs.configuration }}
-      coverage_threshold: ${{ inputs.coverage_threshold }}
-      build_archive: true
-    secrets:
-      PIPELINE_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
-
   create_release:
     name: Create GitHub Release
-    needs: ci
     runs-on: macos-latest
     outputs:
       version: ${{ steps.version_check.outputs.version }}
@@ -160,6 +151,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This workflow does not build anything itself -- it consumes the
+      # `ios-archive-unsigned` artifact the CALLER's own CI job already
+      # produced earlier in the same workflow run (reusable-workflow calls
+      # share one run, so artifacts from a `uses:` job upstream are visible
+      # here via plain actions/download-artifact). The caller must run its CI
+      # job with `build_archive: true` before invoking this workflow -- see
+      # the pipeline README's "Consolidated CI+CD build" section.
       - name: Download unsigned iOS archive
         uses: actions/download-artifact@v4
         with:
