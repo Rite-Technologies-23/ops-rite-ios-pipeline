@@ -15,12 +15,20 @@ set -euo pipefail
 
 ROOT="${1:-.}"
 
-mapfile -t FILES < <(find "$ROOT" \
+# mapfile/readarray and `local -n` namerefs need bash 4+; macOS ships /bin/bash
+# 3.2 (Apple won't distribute GPLv3 bash), so lines are read into an array by
+# hand with a plain while-read loop instead.
+FILES=()
+while IFS= read -r line; do
+  FILES+=("$line")
+done < <(find "$ROOT" \
   -name '*.junit' -o -name 'junit.xml' -o -name 'report.junit' \
   -not -path '*/.pipeline/*' 2>/dev/null || true)
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-  mapfile -t FILES < <(find "$ROOT" -path '*reports*' -name '*.xml' \
+  while IFS= read -r line; do
+    FILES+=("$line")
+  done < <(find "$ROOT" -path '*reports*' -name '*.xml' \
     -not -path '*/.pipeline/*' 2>/dev/null || true)
 fi
 

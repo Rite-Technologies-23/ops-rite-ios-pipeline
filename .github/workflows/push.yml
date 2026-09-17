@@ -681,7 +681,12 @@ jobs:
           set -euo pipefail
           mkdir -p build/reports build/analyzer
 
-          mapfile -t STRICT < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
+          # mapfile needs bash 4+; macOS ships /bin/bash 3.2 (Apple won't
+          # distribute GPLv3 bash), so this reads lines by hand instead.
+          STRICT=()
+          while IFS= read -r line; do
+            STRICT+=("$line")
+          done < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
 
           set -o pipefail
           xcodebuild analyze \
@@ -772,7 +777,12 @@ jobs:
           echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> "$GITHUB_ENV"
           rm -rf "$RESULT_BUNDLE"
 
-          mapfile -t STRICT < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
+          # mapfile needs bash 4+; macOS ships /bin/bash 3.2 (Apple won't
+          # distribute GPLv3 bash), so this reads lines by hand instead.
+          STRICT=()
+          while IFS= read -r line; do
+            STRICT+=("$line")
+          done < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
 
           EXTRA=()
           if [ -n "${{ inputs.test_plan }}" ]; then
@@ -870,7 +880,12 @@ jobs:
 
           ARCHIVE_PATH="artifact/ios-archive-unsigned.xcarchive"
 
-          mapfile -t STRICT < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
+          # mapfile needs bash 4+; macOS ships /bin/bash 3.2 (Apple won't
+          # distribute GPLv3 bash), so this reads lines by hand instead.
+          STRICT=()
+          while IFS= read -r line; do
+            STRICT+=("$line")
+          done < <(bash .pipeline/.github/tool/scripts/xcodebuild_flags.sh)
 
           set -o pipefail
           xcodebuild archive \
