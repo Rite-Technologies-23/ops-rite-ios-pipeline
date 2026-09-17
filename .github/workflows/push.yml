@@ -696,7 +696,7 @@ jobs:
             -destination "generic/platform=iOS" \
             CLANG_ANALYZER_OUTPUT=plist-html \
             CLANG_ANALYZER_OUTPUT_DIR="$PWD/build/analyzer" \
-            "${STRICT[@]}" \
+            "${STRICT[@]+"${STRICT[@]}"}" \
             | xcbeautify
 
       - name: Summarise analyzer findings
@@ -798,8 +798,8 @@ jobs:
             -destination "${{ steps.destination.outputs.destination }}" \
             -resultBundlePath "$RESULT_BUNDLE" \
             -enableCodeCoverage YES \
-            "${EXTRA[@]}" \
-            "${STRICT[@]}" \
+            "${EXTRA[@]+"${EXTRA[@]}"}" \
+            "${STRICT[@]+"${STRICT[@]}"}" \
             | xcbeautify --report junit --report-path build/reports
 
       - name: Compute coverage and gate
@@ -894,7 +894,7 @@ jobs:
             -configuration "${{ inputs.configuration }}" \
             -destination "generic/platform=iOS" \
             -archivePath "$ARCHIVE_PATH" \
-            "${STRICT[@]}" \
+            "${STRICT[@]+"${STRICT[@]}"}" \
             | xcbeautify
 
           echo "Archive contents:"
