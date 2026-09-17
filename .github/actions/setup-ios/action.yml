@@ -121,10 +121,14 @@ runs:
   steps:
 
     # ----------------------------------------------------------------------
-    # github.repository is the CALLER inside a reusable workflow, so it cannot
-    # identify this pipeline. github.workflow_ref carries the owning repo and
-    # ref of the workflow file itself, which guarantees configs always match
-    # the workflow version being executed.
+    # github.repository is the CALLER inside a reusable workflow, so it can't
+    # identify this pipeline. GITHUB_WORKFLOW_REF doesn't work either -- it
+    # resolves to the top-level (caller's) workflow file, not the reusable
+    # workflow currently executing, so parsing it previously checked out the
+    # CALLER's own repo into .pipeline instead of this pipeline repo.
+    # GITHUB_ACTION_REPOSITORY/GITHUB_ACTION_REF are set specifically to
+    # identify the repo@ref of the action that's currently running -- this
+    # composite action itself -- which is exactly what's needed here.
     # ----------------------------------------------------------------------
     - name: Resolve pipeline source
       id: resolve
@@ -132,13 +136,13 @@ runs:
       run: |
         set -euo pipefail
 
-        WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-}"
+        PIPELINE_REPO="${GITHUB_ACTION_REPOSITORY:-}"
+        PIPELINE_REF="${GITHUB_ACTION_REF:-}"
 
-        if [ -n "$WORKFLOW_REF" ]; then
-          PIPELINE_REPO="${WORKFLOW_REF%%/.github/*}"
-          PIPELINE_REF="${WORKFLOW_REF##*@}"
-        else
+        if [ -z "$PIPELINE_REPO" ]; then
           PIPELINE_REPO="Rite-Technologies-23/ops-rite-ios-pipeline"
+        fi
+        if [ -z "$PIPELINE_REF" ]; then
           PIPELINE_REF="main"
         fi
 
