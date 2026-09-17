@@ -64,6 +64,37 @@ inputs:
       repo is PRIVATE and the caller lives in a different repo -- the default
       GITHUB_TOKEN is scoped to the caller repo and will 403.
 
+  checkout_hl7core:
+    required: false
+    default: "false"
+    description: >-
+      Fetch Hl7Core's generated hl7Core/swiftpackage fresh for this job and
+      stage it as a sibling directory of the caller checkout (one level above
+      $GITHUB_WORKSPACE), for callers whose Xcode project has a LOCAL Swift
+      package reference to it (e.g. mobrite_pill_counter_ios, relativePath
+      ../../swiftpackage). Nothing is committed anywhere -- it's fetched fresh
+      each run and removed again in cleanup_hl7core before the runner is torn
+      down. Without this, xcodebuild can't even list schemes -- it tries to
+      resolve the package graph to do so, and the local path doesn't exist on
+      a fresh runner.
+
+  hl7core_repo:
+    required: false
+    default: "Rite-Technologies-23/mobrite_hl7_parser_builder"
+    description: "Repo that publishes the generated hl7Core/swiftpackage, used when checkout_hl7core is true."
+
+  hl7core_ref:
+    required: false
+    default: "main"
+    description: "Ref of hl7core_repo to check out."
+
+  hl7core_token:
+    required: false
+    default: ""
+    description: >-
+      Token to check out hl7core_repo when private. Falls back to
+      pipeline_token, then the default GITHUB_TOKEN.
+
 outputs:
   pipeline_dir:
     description: "Directory the pipeline repo was checked out into"
@@ -126,6 +157,42 @@ runs:
         path: ${{ steps.resolve.outputs.dir }}
         token: ${{ inputs.pipeline_token != '' && inputs.pipeline_token || github.token }}
         persist-credentials: false
+
+    # ----------------------------------------------------------------------
+    # Some callers (mobrite_pill_counter_ios) reference Hl7Core as a LOCAL
+    # Swift package (relativePath ../../swiftpackage) rather than a remote
+    # one, because Hl7Core's Package.swift lives at hl7Core/swiftpackage in
+    # its repo, not at the repo root -- SPM's remote-package resolution can't
+    # target a subdirectory, only a local path or a repo-root manifest. So we
+    # reconstruct that same sibling layout on the runner: check out just the
+    # generated hl7Core/swiftpackage folder and place it where the local
+    # reference expects it, one directory above the caller's checkout. This
+    # is fetched fresh every run and torn down by "Cleanup Hl7Core swiftpackage"
+    # in the calling workflow -- nothing is ever committed anywhere.
+    # ----------------------------------------------------------------------
+    - name: Checkout Hl7Core Swift package
+      id: checkout_hl7core
+      if: ${{ inputs.checkout_hl7core == 'true' }}
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.hl7core_repo }}
+        ref: ${{ inputs.hl7core_ref }}
+        path: ../hl7core-src
+        sparse-checkout: |
+          hl7Core/swiftpackage
+        sparse-checkout-cone-mode: false
+        token: ${{ inputs.hl7core_token != '' && inputs.hl7core_token || (inputs.pipeline_token != '' && inputs.pipeline_token || github.token) }}
+        persist-credentials: false
+
+    - name: Stage Hl7Core swiftpackage as a sibling package
+      if: ${{ inputs.checkout_hl7core == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf ../swiftpackage
+        mv ../hl7core-src/hl7Core/swiftpackage ../swiftpackage
+        rm -rf ../hl7core-src
+        echo "Staged Hl7Core swiftpackage at $(cd .. && pwd)/swiftpackage"
 
     - name: Select Xcode
       if: ${{ inputs.xcode_version != 'latest-stable' && runner.os == 'macOS' }}

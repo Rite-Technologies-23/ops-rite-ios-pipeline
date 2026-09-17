@@ -48,6 +48,26 @@ on:
         type: string
         default: ""
 
+      checkout_hl7core:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Fetch Hl7Core's generated swiftpackage fresh for each job and stage
+          it as a sibling directory for callers with a LOCAL Swift package
+          reference to it, then remove it again once the job's xcodebuild
+          steps finish. See the setup-ios action's checkout_hl7core input.
+
+      hl7core_repo:
+        required: false
+        type: string
+        default: "Rite-Technologies-23/mobrite_hl7_parser_builder"
+
+      hl7core_ref:
+        required: false
+        type: string
+        default: "main"
+
       configuration:
         required: false
         type: string
@@ -272,6 +292,10 @@ jobs:
           project: ${{ inputs.project }}
           scheme: ${{ inputs.scheme }}
           pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          checkout_hl7core: ${{ inputs.checkout_hl7core }}
+          hl7core_repo: ${{ inputs.hl7core_repo }}
+          hl7core_ref: ${{ inputs.hl7core_ref }}
+          hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: swiftlint swiftformat
           resolve_dependencies: "false"
           cache_key_suffix: quality
@@ -339,6 +363,11 @@ jobs:
           path: build/reports/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Cleanup Hl7Core swiftpackage
+        if: ${{ always() && inputs.checkout_hl7core }}
+        shell: bash
+        run: rm -rf ../swiftpackage
 
   # =========================================================================
   # 2. SECURITY  (the bandit equivalent)
@@ -529,6 +558,10 @@ jobs:
           project: ${{ inputs.project }}
           scheme: ${{ inputs.scheme }}
           pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          checkout_hl7core: ${{ inputs.checkout_hl7core }}
+          hl7core_repo: ${{ inputs.hl7core_repo }}
+          hl7core_ref: ${{ inputs.hl7core_ref }}
+          hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: periphery
           cache_derived_data: "true"
           cache_key_suffix: deadcode
@@ -604,6 +637,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Cleanup Hl7Core swiftpackage
+        if: ${{ always() && inputs.checkout_hl7core }}
+        shell: bash
+        run: rm -rf ../swiftpackage
+
   # =========================================================================
   # 4. CLANG STATIC ANALYZER  (opt-in: a fourth full compile on a 10x runner)
   # =========================================================================
@@ -626,6 +664,10 @@ jobs:
           project: ${{ inputs.project }}
           scheme: ${{ inputs.scheme }}
           pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          checkout_hl7core: ${{ inputs.checkout_hl7core }}
+          hl7core_repo: ${{ inputs.hl7core_repo }}
+          hl7core_ref: ${{ inputs.hl7core_ref }}
+          hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: xcbeautify
           cache_derived_data: "true"
           cache_key_suffix: analyze
@@ -674,6 +716,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Cleanup Hl7Core swiftpackage
+        if: ${{ always() && inputs.checkout_hl7core }}
+        shell: bash
+        run: rm -rf ../swiftpackage
+
   # =========================================================================
   # 5. TESTS + COVERAGE
   # =========================================================================
@@ -700,6 +747,10 @@ jobs:
           project: ${{ inputs.project }}
           scheme: ${{ inputs.scheme }}
           pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          checkout_hl7core: ${{ inputs.checkout_hl7core }}
+          hl7core_repo: ${{ inputs.hl7core_repo }}
+          hl7core_ref: ${{ inputs.hl7core_ref }}
+          hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: xcbeautify
           cache_derived_data: "true"
           cache_key_suffix: test
@@ -773,6 +824,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Cleanup Hl7Core swiftpackage
+        if: ${{ always() && inputs.checkout_hl7core }}
+        shell: bash
+        run: rm -rf ../swiftpackage
+
   # =========================================================================
   # 6. ARCHIVE  (artifact contract consumed by release.yml)
   # =========================================================================
@@ -796,6 +852,10 @@ jobs:
           project: ${{ inputs.project }}
           scheme: ${{ inputs.scheme }}
           pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          checkout_hl7core: ${{ inputs.checkout_hl7core }}
+          hl7core_repo: ${{ inputs.hl7core_repo }}
+          hl7core_ref: ${{ inputs.hl7core_ref }}
+          hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: xcbeautify
           cache_derived_data: "true"
           cache_key_suffix: archive
@@ -834,6 +894,11 @@ jobs:
           path: artifact
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Cleanup Hl7Core swiftpackage
+        if: ${{ always() && inputs.checkout_hl7core }}
+        shell: bash
+        run: rm -rf ../swiftpackage
 
   # =========================================================================
   # 7. SUMMARY
