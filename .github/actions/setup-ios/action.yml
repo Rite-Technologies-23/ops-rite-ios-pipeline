@@ -177,7 +177,11 @@ runs:
       with:
         repository: ${{ inputs.hl7core_repo }}
         ref: ${{ inputs.hl7core_ref }}
-        path: ../hl7core-src
+        # actions/checkout refuses any path outside $GITHUB_WORKSPACE, so this
+        # checks out inside it (as a throwaway subfolder) and the next step
+        # moves just the swiftpackage folder out to the sibling location with
+        # a plain `mv`, which isn't subject to that restriction.
+        path: hl7core-src
         sparse-checkout: |
           hl7Core/swiftpackage
         sparse-checkout-cone-mode: false
@@ -190,8 +194,8 @@ runs:
       run: |
         set -euo pipefail
         rm -rf ../swiftpackage
-        mv ../hl7core-src/hl7Core/swiftpackage ../swiftpackage
-        rm -rf ../hl7core-src
+        mv hl7core-src/hl7Core/swiftpackage ../swiftpackage
+        rm -rf hl7core-src
         echo "Staged Hl7Core swiftpackage at $(cd .. && pwd)/swiftpackage"
 
     - name: Select Xcode
