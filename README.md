@@ -295,14 +295,15 @@ instead of the shared one.
 - GitHub Release creation
 - iOS signing with certificate and provisioning profile
 - IPA export from archive
-- TestFlight upload
+- TestFlight upload and Esper upload, each an independent opt-in (the GitHub release is always created; a deploy with missing credentials is skipped with a warning)
 - Upload IPA artifact to GitHub Release
 - Optional **“What’s New”** release notes
 
 ### Inputs
 
 - `version`
-- `deploy_to_testflight`
+- `deploy_to_testflight` (default `false`)
+- `deploy_to_esper` (default `false`), `esper_export_method` (`development`, `ad-hoc` or `enterprise`; default `ad-hoc`), `esper_tenant`
 - `ios_bundle_id`
 - `enable_whats_new`
 - `whats_new_file`

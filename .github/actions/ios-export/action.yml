@@ -1,0 +1,112 @@
+name: "iOS Export IPA"
+description: >-
+  Installs a signing certificate and provisioning profile into a throwaway
+  keychain, then exports an IPA from an unsigned .xcarchive with the given
+  export method. Exports to $RUNNER_TEMP/export.
+
+inputs:
+  p12_base64:
+    required: true
+  p12_password:
+    required: true
+  profile_base64:
+    required: true
+  team_id:
+    required: true
+  bundle_id:
+    required: true
+  method:
+    required: true
+    description: "app-store, development, ad-hoc or enterprise"
+  archive:
+    required: true
+    description: "Path to the .xcarchive"
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Install certificate & profile
+      shell: bash
+      env:
+        P12_BASE64: ${{ inputs.p12_base64 }}
+        P12_PASSWORD: ${{ inputs.p12_password }}
+        PROFILE_BASE64: ${{ inputs.profile_base64 }}
+      run: |
+        set -euo pipefail
+
+        KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+        KEYCHAIN_PWD="temp"
+
+        security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN"
+        security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+        security list-keychains -d user -s "$KEYCHAIN"
+        security default-keychain -d user -s "$KEYCHAIN"
+
+        echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" \
+          -k "$KEYCHAIN" \
+          -P "$P12_PASSWORD" \
+          -T /usr/bin/codesign \
+          -T /usr/bin/security \
+          -T /usr/bin/xcodebuild
+
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+        mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+        echo "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+
+        UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/profile.mobileprovision")")
+        cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+
+        echo "Installed provisioning profile UUID: $UUID"
+        echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+        security find-identity -p codesigning -v
+
+    - name: Export IPA
+      shell: bash
+      env:
+        TEAM_ID: ${{ inputs.team_id }}
+        BUNDLE_ID: ${{ inputs.bundle_id }}
+        METHOD: ${{ inputs.method }}
+        ARCHIVE: ${{ inputs.archive }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "$ARCHIVE" ]; then
+          echo "::error::Archive not found at $ARCHIVE"
+          exit 1
+        fi
+
+        cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>method</key>
+          <string>${METHOD}</string>
+
+          <key>signingStyle</key>
+          <string>manual</string>
+
+          <key>teamID</key>
+          <string>${TEAM_ID}</string>
+
+          <key>provisioningProfiles</key>
+          <dict>
+            <key>${BUNDLE_ID}</key>
+            <string>${PROFILE_UUID}</string>
+          </dict>
+
+          <key>compileBitcode</key>
+          <false/>
+        </dict>
+        </plist>
+        EOF
+
+        xcodebuild -exportArchive \
+          -archivePath "$ARCHIVE" \
+          -exportPath "$RUNNER_TEMP/export" \
+          -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"

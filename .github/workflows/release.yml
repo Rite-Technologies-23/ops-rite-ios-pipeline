@@ -1,5 +1,12 @@
 name: "Reusable iOS CD (Release)"
 
+# Release targets are independent caller flags; the GitHub release is always
+# created, with whichever signed IPAs could be produced:
+#   GitHub      always
+#   App Store   deploy_to_testflight  (app-store export)
+#   Esper       deploy_to_esper       (esper_export_method export)
+# A deploy whose credentials are missing is skipped with a warning.
+
 on:
   workflow_call:
     inputs:
@@ -10,11 +17,27 @@ on:
       deploy_to_testflight:
         required: false
         type: boolean
-        default: true
+        default: false
 
       ios_bundle_id:
         required: true
         type: string
+
+      deploy_to_esper:
+        required: false
+        type: boolean
+        default: false
+
+      esper_export_method:
+        required: false
+        type: string
+        default: "ad-hoc"
+        description: "Export method for the Esper IPA: development, ad-hoc or enterprise."
+
+      esper_tenant:
+        required: false
+        type: string
+        default: ""
 
       enable_whats_new:
         required: false
@@ -62,23 +85,34 @@ on:
         default: "0"
 
     secrets:
-      # Signing
+      # Signing (app-store export)
       IOS_TEAM_ID:
-        required: true
+        required: false
       IOS_CERT_P12_BASE64:
-        required: true
+        required: false
       IOS_CERT_PASSWORD:
-        required: true
+        required: false
       IOS_PROVISION_PROFILE_BASE64:
-        required: true
+        required: false
+
+      # Esper export. The certificate falls back to IOS_CERT_* when empty
+      # (normal for ad-hoc); the profile must be its own.
+      IOS_ESPER_CERT_P12_BASE64:
+        required: false
+      IOS_ESPER_CERT_PASSWORD:
+        required: false
+      IOS_ESPER_PROVISION_PROFILE_BASE64:
+        required: false
+      ESPER_API_KEY:
+        required: false
 
       # App Store Connect API
       APPSTORE_ISSUER_ID:
-        required: true
+        required: false
       APPSTORE_KEY_ID:
-        required: true
+        required: false
       APPSTORE_PRIVATE_KEY:
-        required: true
+        required: false
 
       # Unused (no nested CI pass runs here anymore -- see note near
       # xcode_version above). Kept for backward compatibility.
@@ -98,9 +132,128 @@ defaults:
 
 jobs:
 
+  # This workflow does not build anything itself -- it consumes the
+  # `ios-archive-unsigned` artifact the CALLER's own CI job already produced
+  # earlier in the same workflow run. The caller must run its CI job with
+  # `build_archive: true` -- see the pipeline README's "Consolidated CI+CD
+  # build" section.
+  sign_ios:
+    name: Sign iOS & Export IPA
+    runs-on: macos-latest
+
+    outputs:
+      signed: ${{ steps.chk.outputs.ok }}
+
+    steps:
+      # Missing secrets never fail the run: signing is skipped, and the
+      # release/TestFlight jobs key off `ok`.
+      - name: Check signing secrets
+        id: chk
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          P12: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          P12_PWD: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        run: |
+          if [ -n "$TEAM_ID" ] && [ -n "$P12" ] && [ -n "$P12_PWD" ] && [ -n "$PROFILE" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::iOS signing skipped: one or more of IOS_TEAM_ID, IOS_CERT_P12_BASE64, IOS_CERT_PASSWORD, IOS_PROVISION_PROFILE_BASE64 is not set. No IPA will be attached and TestFlight will be skipped."
+          fi
+
+      - name: Download unsigned iOS archive
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-archive-unsigned
+          path: archive
+
+      - name: Export IPA (app-store)
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/ios-export@main
+        with:
+          p12_base64: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          p12_password: ${{ secrets.IOS_CERT_PASSWORD }}
+          profile_base64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          team_id: ${{ secrets.IOS_TEAM_ID }}
+          bundle_id: ${{ inputs.ios_bundle_id }}
+          method: app-store
+          archive: archive/ios-archive-unsigned.xcarchive
+
+      - name: Upload signed IPA artifact
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa-signed
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
+
+  sign_ios_esper:
+    name: Sign iOS for Esper
+    if: ${{ inputs.deploy_to_esper }}
+    runs-on: macos-latest
+
+    outputs:
+      signed: ${{ steps.chk.outputs.ok }}
+
+    steps:
+      - name: Check Esper signing secrets
+        id: chk
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          P12: ${{ secrets.IOS_ESPER_CERT_P12_BASE64 || secrets.IOS_CERT_P12_BASE64 }}
+          P12_PWD: ${{ secrets.IOS_ESPER_CERT_PASSWORD || secrets.IOS_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_ESPER_PROVISION_PROFILE_BASE64 }}
+        run: |
+          if [ -n "$TEAM_ID" ] && [ -n "$P12" ] && [ -n "$P12_PWD" ] && [ -n "$PROFILE" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Esper iOS deploy skipped: IOS_TEAM_ID, a signing certificate (IOS_ESPER_CERT_* or IOS_CERT_*) or IOS_ESPER_PROVISION_PROFILE_BASE64 is not set."
+          fi
+
+      - name: Download unsigned iOS archive
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-archive-unsigned
+          path: archive
+
+      - name: Export IPA (Esper)
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: Rite-Technologies-23/ops-rite-ios-pipeline/.github/actions/ios-export@main
+        with:
+          p12_base64: ${{ secrets.IOS_ESPER_CERT_P12_BASE64 || secrets.IOS_CERT_P12_BASE64 }}
+          p12_password: ${{ secrets.IOS_ESPER_CERT_PASSWORD || secrets.IOS_CERT_PASSWORD }}
+          profile_base64: ${{ secrets.IOS_ESPER_PROVISION_PROFILE_BASE64 }}
+          team_id: ${{ secrets.IOS_TEAM_ID }}
+          bundle_id: ${{ inputs.ios_bundle_id }}
+          method: ${{ inputs.esper_export_method }}
+          archive: archive/ios-archive-unsigned.xcarchive
+
+      # Distinct name so it can sit next to the app-store IPA on the Release.
+      - name: Rename Esper IPA
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        run: |
+          set -euo pipefail
+          for f in "$RUNNER_TEMP"/export/*.ipa; do mv "$f" "${f%.ipa}-esper.ipa"; done
+
+      - name: Upload Esper IPA artifact
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa-esper
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
+
   create_release:
     name: Create GitHub Release
-    runs-on: macos-latest
+    needs: [sign_ios, sign_ios_esper]
+    # Either sign job may be skipped; !failure() lets this still run.
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+
     outputs:
       version: ${{ steps.version_check.outputs.version }}
       tag: ${{ steps.version_check.outputs.tag }}
@@ -109,6 +262,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download signed IPA
+        if: ${{ needs.sign_ios.outputs.signed == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa-signed
+          path: release/ios
+
+      - name: Download Esper IPA
+        if: ${{ needs.sign_ios_esper.outputs.signed == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa-esper
+          path: release/ios
 
       - name: Determine next GitHub version
         id: version_check
@@ -135,159 +302,58 @@ jobs:
           echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.version_check.outputs.tag }}
           name: Release ${{ steps.version_check.outputs.tag }}
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  sign_ios:
-    name: Sign iOS & Export IPA
-    needs: create_release
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # This workflow does not build anything itself -- it consumes the
-      # `ios-archive-unsigned` artifact the CALLER's own CI job already
-      # produced earlier in the same workflow run (reusable-workflow calls
-      # share one run, so artifacts from a `uses:` job upstream are visible
-      # here via plain actions/download-artifact). The caller must run its CI
-      # job with `build_archive: true` before invoking this workflow -- see
-      # the pipeline README's "Consolidated CI+CD build" section.
-      - name: Download unsigned iOS archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ios-archive-unsigned
-          path: archive
-
-      - name: Debug Archive Structure
-        run: |
-          echo "PWD:"
-          pwd
-          echo "Archive contents:"
-          ls -R archive
-
-      - name: Install certificate & profile
-        env:
-          P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
-          PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
-        run: |
-          set -euo pipefail
-
-          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
-          KEYCHAIN_PWD="temp"
-
-          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
-
-          security list-keychains -d user -s "$KEYCHAIN"
-          security default-keychain -d user -s "$KEYCHAIN"
-
-          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" \
-            -k "$KEYCHAIN" \
-            -P "$P12_PASSWORD" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security \
-            -T /usr/bin/xcodebuild
-
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
-
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
-
-          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/profile.mobileprovision")")
-          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
-
-          echo "✅ Installed provisioning profile UUID: $UUID"
-          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
-          security find-identity -p codesigning -v
-
-      - name: Generate ExportOptions.plist
-        run: |
-          set -euo pipefail
-
-          cat > ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>app-store</string>
-
-            <key>signingStyle</key>
-            <string>manual</string>
-
-            <key>teamID</key>
-            <string>${{ secrets.IOS_TEAM_ID }}</string>
-
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${{ inputs.ios_bundle_id }}</key>
-              <string>$PROFILE_UUID</string>
-            </dict>
-
-            <key>compileBitcode</key>
-            <false/>
-          </dict>
-          </plist>
-          EOF
-
-      - name: Export IPA
-        run: |
-          set -euo pipefail
-
-          ARCHIVE="archive/ios-archive-unsigned.xcarchive"
-          if [ ! -d "$ARCHIVE" ]; then
-          echo "❌ Archive not found at $ARCHIVE"
-          ls -R archive || true
-          exit 1
-          fi
-
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE" \
-            -exportPath "$RUNNER_TEMP/export" \
-            -exportOptionsPlist ExportOptions.plist
-
-      - name: Upload signed IPA artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-ipa-signed
-          path: ${{ runner.temp }}/export/*.ipa
-          if-no-files-found: warn
+          files: release/ios/*.ipa
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   deploy_testflight:
     name: Deploy to TestFlight
-    if: ${{ inputs.deploy_to_testflight }}
+    if: ${{ inputs.deploy_to_testflight && needs.sign_ios.outputs.signed == 'true' }}
     needs: sign_ios
     runs-on: macos-latest
 
     steps:
+      - name: Check App Store Connect credentials
+        id: chk
+        env:
+          ISSUER: ${{ secrets.APPSTORE_ISSUER_ID }}
+          KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+        run: |
+          if [ -n "$ISSUER" ] && [ -n "$KEY_ID" ] && [ -n "$KEY" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::TestFlight deploy skipped: APPSTORE_ISSUER_ID, APPSTORE_KEY_ID or APPSTORE_PRIVATE_KEY is not set."
+          fi
+
       - uses: actions/checkout@v4
+        if: ${{ steps.chk.outputs.ok == 'true' }}
 
       - name: Download signed IPA
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: ios-ipa-signed
           path: release/ios
 
       - name: Setup Ruby
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.2"
           bundler-cache: false
 
       - name: Install fastlane
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         run: gem install fastlane -N
 
       - name: Upload to TestFlight
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         env:
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
@@ -335,31 +401,61 @@ jobs:
             fastlane pilot upload --ipa "$IPA" --api_key_path api_key.json
           fi
 
-  upload_to_release:
-    name: Upload IPA to GitHub Release
-    needs: [create_release, sign_ios]
-    runs-on: macos-latest
+  deploy_esper:
+    name: Deploy to Esper
+    if: ${{ inputs.deploy_to_esper && needs.sign_ios_esper.outputs.signed == 'true' }}
+    needs: sign_ios_esper
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check Esper configuration
+        id: chk
+        env:
+          ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
+          ESPER_TENANT: ${{ inputs.esper_tenant }}
+        run: |
+          if [ -n "$ESPER_API_KEY" ] && [ -n "$ESPER_TENANT" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Esper deploy skipped: ESPER_API_KEY secret or esper_tenant input is empty."
+          fi
 
-      - name: Download signed IPA
+      - name: Download Esper IPA
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: actions/download-artifact@v4
         with:
-          name: ios-ipa-signed
-          path: dist
+          name: ios-ipa-esper
+          path: release/ios
 
-      - name: Upload to GitHub Release
+      - name: Upload to Esper
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
+          ESPER_TENANT: ${{ inputs.esper_tenant }}
         run: |
           set -euo pipefail
-          TAG="${{ needs.create_release.outputs.tag }}"
-          IPA=$(find dist -name "*.ipa" | head -n 1)
 
+          IPA=$(find release/ios -name "*.ipa" | head -n 1)
           if [ -z "$IPA" ]; then
-            echo "❌ No IPA found to upload"
+            echo "::error::No Esper IPA found"
             exit 1
           fi
 
-          gh release upload "$TAG" "$IPA" --clobber --repo "$GITHUB_REPOSITORY"
+          # ponytail: endpoint copied from ops-rite-flutter-cicd and not yet
+          # verified against a real tenant; confirm before relying on it.
+          HTTP_STATUS=$(curl -L -sS -w "%{http_code}" \
+            -X POST "https://${ESPER_TENANT}-api.esper.cloud/api/v2/tenant-apps" \
+            -H "Authorization: Bearer ${ESPER_API_KEY}" \
+            -H "Accept: application/json" \
+            -F "platform=APPLE" \
+            -F "file=@${IPA}" \
+            -o esper_ios_response.json)
+
+          cat esper_ios_response.json || true
+          echo "HTTP Status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+            echo "::error::Esper iOS upload failed"
+            exit 1
+          fi
