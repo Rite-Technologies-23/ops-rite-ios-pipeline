@@ -88,6 +88,20 @@ inputs:
     default: "main"
     description: "Ref of hl7core_repo to check out."
 
+  build_hl7core:
+    required: false
+    default: "false"
+    description: >-
+      Build hl7Core/swiftpackage from source with Gradle (needs a macOS runner)
+      instead of checking out a committed copy, for when hl7core_ref no longer
+      carries the folder. Cached by Hl7Core commit SHA. Only applies when
+      checkout_hl7core is true.
+
+  hl7core_java_version:
+    required: false
+    default: "17"
+    description: "JDK used to build Hl7Core when build_hl7core is true."
+
   hl7core_token:
     required: false
     default: ""
@@ -186,11 +200,61 @@ runs:
         # moves just the swiftpackage folder out to the sibling location with
         # a plain `mv`, which isn't subject to that restriction.
         path: hl7core-src
-        sparse-checkout: |
-          hl7Core/swiftpackage
+        # Empty = full checkout, which the Gradle build needs.
+        sparse-checkout: ${{ inputs.build_hl7core != 'true' && 'hl7Core/swiftpackage' || '' }}
         sparse-checkout-cone-mode: false
         token: ${{ inputs.hl7core_token != '' && inputs.hl7core_token || (inputs.pipeline_token != '' && inputs.pipeline_token || github.token) }}
         persist-credentials: false
+
+    - name: Resolve Hl7Core commit
+      id: hl7core_sha
+      if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' }}
+      shell: bash
+      run: echo "sha=$(git -C hl7core-src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore built Hl7Core swiftpackage
+      id: hl7core_cache
+      if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: hl7core-src/hl7Core/swiftpackage
+        key: hl7core-swiftpackage-${{ runner.os }}-${{ inputs.hl7core_java_version }}-${{ steps.hl7core_sha.outputs.sha }}
+
+    - name: Cache Gradle and Kotlin/Native downloads
+      if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' && steps.hl7core_cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ~/.konan
+        key: hl7core-gradle-${{ runner.os }}-${{ hashFiles('hl7core-src/**/*.gradle*', 'hl7core-src/gradle/wrapper/gradle-wrapper.properties', 'hl7core-src/gradle/libs.versions.toml') }}
+        restore-keys: hl7core-gradle-${{ runner.os }}-
+
+    - name: Set up JDK for Hl7Core build
+      if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' && steps.hl7core_cache.outputs.cache-hit != 'true' }}
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.hl7core_java_version }}
+
+    - name: Build Hl7Core swiftpackage
+      if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' && steps.hl7core_cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      working-directory: hl7core-src
+      run: |
+        set -euo pipefail
+        ./gradlew :hl7Core:linkReleaseFrameworkIosSimulatorArm64 --no-daemon
+        ./gradlew :hl7Core:createSwiftPackage --no-daemon
+        test -d hl7Core/swiftpackage || { echo "::error::createSwiftPackage did not produce hl7Core/swiftpackage"; exit 1; }
+
+    # Saved here, before the stage step below moves the folder out of hl7core-src.
+    - name: Save built Hl7Core swiftpackage
+      if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' && steps.hl7core_cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: hl7core-src/hl7Core/swiftpackage
+        key: ${{ steps.hl7core_cache.outputs.cache-primary-key }}
 
     - name: Stage Hl7Core swiftpackage as a sibling package
       if: ${{ inputs.checkout_hl7core == 'true' }}

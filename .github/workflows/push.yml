@@ -68,6 +68,21 @@ on:
         type: string
         default: "main"
 
+      build_hl7core:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Build hl7Core/swiftpackage from source (Gradle) instead of checking out
+          a committed copy. For when hl7core_ref no longer carries the folder.
+          Only applies when checkout_hl7core is true.
+
+      hl7core_java_version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK used to build Hl7Core when build_hl7core is true."
+
       configuration:
         required: false
         type: string
@@ -295,6 +310,8 @@ jobs:
           checkout_hl7core: ${{ inputs.checkout_hl7core }}
           hl7core_repo: ${{ inputs.hl7core_repo }}
           hl7core_ref: ${{ inputs.hl7core_ref }}
+          build_hl7core: ${{ inputs.build_hl7core }}
+          hl7core_java_version: ${{ inputs.hl7core_java_version }}
           hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: swiftlint swiftformat
           resolve_dependencies: "false"
@@ -561,6 +578,8 @@ jobs:
           checkout_hl7core: ${{ inputs.checkout_hl7core }}
           hl7core_repo: ${{ inputs.hl7core_repo }}
           hl7core_ref: ${{ inputs.hl7core_ref }}
+          build_hl7core: ${{ inputs.build_hl7core }}
+          hl7core_java_version: ${{ inputs.hl7core_java_version }}
           hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: periphery
           cache_derived_data: "true"
@@ -667,6 +686,8 @@ jobs:
           checkout_hl7core: ${{ inputs.checkout_hl7core }}
           hl7core_repo: ${{ inputs.hl7core_repo }}
           hl7core_ref: ${{ inputs.hl7core_ref }}
+          build_hl7core: ${{ inputs.build_hl7core }}
+          hl7core_java_version: ${{ inputs.hl7core_java_version }}
           hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: xcbeautify
           cache_derived_data: "true"
@@ -755,6 +776,8 @@ jobs:
           checkout_hl7core: ${{ inputs.checkout_hl7core }}
           hl7core_repo: ${{ inputs.hl7core_repo }}
           hl7core_ref: ${{ inputs.hl7core_ref }}
+          build_hl7core: ${{ inputs.build_hl7core }}
+          hl7core_java_version: ${{ inputs.hl7core_java_version }}
           hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: xcbeautify
           cache_derived_data: "true"
@@ -865,6 +888,8 @@ jobs:
           checkout_hl7core: ${{ inputs.checkout_hl7core }}
           hl7core_repo: ${{ inputs.hl7core_repo }}
           hl7core_ref: ${{ inputs.hl7core_ref }}
+          build_hl7core: ${{ inputs.build_hl7core }}
+          hl7core_java_version: ${{ inputs.hl7core_java_version }}
           hl7core_token: ${{ secrets.PIPELINE_TOKEN }}
           tools: xcbeautify
           cache_derived_data: "true"
