@@ -870,7 +870,7 @@ jobs:
 
   summary:
     name: CI Summary
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.security_runner }}
     needs: [quality, security, dead_code, analyze, test, build]
     if: ${{ always() }}
 

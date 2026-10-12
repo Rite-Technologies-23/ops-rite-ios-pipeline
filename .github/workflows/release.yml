@@ -81,6 +81,16 @@ on:
         type: string
         default: "0"
 
+      runner:
+        required: false
+        type: string
+        default: macos-latest
+
+      linux_runner:
+        required: false
+        type: string
+        default: ubuntu-latest
+
     secrets:
       IOS_TEAM_ID:
         required: false
@@ -125,7 +135,7 @@ jobs:
 
   sign_ios:
     name: Sign iOS & Export IPA
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner }}
 
     outputs:
       signed: ${{ steps.chk.outputs.ok }}
@@ -173,11 +183,17 @@ jobs:
           path: ${{ runner.temp }}/export/*.ipa
           if-no-files-found: error
 
+      - name: Remove signing keychain and profile
+        if: ${{ always() }}
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          if [ -n "${PROFILE_UUID:-}" ]; then rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"; fi
+
 
   sign_ios_esper:
     name: Sign iOS for Esper
     if: ${{ inputs.deploy_to_esper }}
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner }}
 
     outputs:
       signed: ${{ steps.chk.outputs.ok }}
@@ -231,13 +247,19 @@ jobs:
           path: ${{ runner.temp }}/export/*.ipa
           if-no-files-found: error
 
+      - name: Remove signing keychain and profile
+        if: ${{ always() }}
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          if [ -n "${PROFILE_UUID:-}" ]; then rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"; fi
+
 
   # Runs even when a sign job is skipped; attaches whichever IPAs exist.
   create_release:
     name: Create GitHub Release
     needs: [sign_ios, sign_ios_esper]
     if: ${{ !cancelled() && !failure() }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.linux_runner }}
 
     outputs:
       version: ${{ steps.version_check.outputs.version }}
@@ -300,7 +322,7 @@ jobs:
     name: Deploy to TestFlight
     if: ${{ inputs.deploy_to_testflight && needs.sign_ios.outputs.signed == 'true' }}
     needs: sign_ios
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner }}
 
     steps:
       - name: Check App Store Connect credentials
@@ -392,7 +414,7 @@ jobs:
     name: Deploy to Esper
     if: ${{ inputs.deploy_to_esper && needs.sign_ios_esper.outputs.signed == 'true' }}
     needs: sign_ios_esper
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.linux_runner }}
 
     steps:
       - name: Check Esper configuration
