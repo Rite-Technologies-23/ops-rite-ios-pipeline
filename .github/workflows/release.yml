@@ -1,11 +1,13 @@
-name: "Reusable iOS CD (Release)"
+# Reusable iOS CD. Consumes ios-archive-unsigned from the caller's CI; never rebuilds.
+#
+# 1. sign_ios: exports the App Store IPA with the ios-export action.
+#    Missing signing secrets skip it with a warning.
+# 2. sign_ios_esper: exports the Esper IPA when deploy_to_esper is on.
+# 3. create_release: always runs. Attaches whichever IPAs were signed.
+# 4. deploy_testflight, deploy_esper: opt-in. Each is skipped with a warning
+#    when its credentials are missing.
 
-# Release targets are independent caller flags; the GitHub release is always
-# created, with whichever signed IPAs could be produced:
-#   GitHub      always
-#   App Store   deploy_to_testflight  (app-store export)
-#   Esper       deploy_to_esper       (esper_export_method export)
-# A deploy whose credentials are missing is skipped with a warning.
+name: "Reusable iOS CD (Release)"
 
 on:
   workflow_call:
@@ -49,11 +51,6 @@ on:
         type: string
         default: ""
 
-      # xcode_version/scheme/workspace/project/configuration/coverage_threshold
-      # are unused inside this workflow -- it no longer runs its own CI pass
-      # (see the removed `ci` job below / the note at `sign_ios`'s artifact
-      # download). Kept for backward compatibility with existing callers that
-      # still pass them; a future major version can drop them.
       xcode_version:
         required: false
         type: string
@@ -85,7 +82,6 @@ on:
         default: "0"
 
     secrets:
-      # Signing (app-store export)
       IOS_TEAM_ID:
         required: false
       IOS_CERT_P12_BASE64:
@@ -95,8 +91,6 @@ on:
       IOS_PROVISION_PROFILE_BASE64:
         required: false
 
-      # Esper export. The certificate falls back to IOS_CERT_* when empty
-      # (normal for ad-hoc); the profile must be its own.
       IOS_ESPER_CERT_P12_BASE64:
         required: false
       IOS_ESPER_CERT_PASSWORD:
@@ -106,7 +100,6 @@ on:
       ESPER_API_KEY:
         required: false
 
-      # App Store Connect API
       APPSTORE_ISSUER_ID:
         required: false
       APPSTORE_KEY_ID:
@@ -114,8 +107,6 @@ on:
       APPSTORE_PRIVATE_KEY:
         required: false
 
-      # Unused (no nested CI pass runs here anymore -- see note near
-      # xcode_version above). Kept for backward compatibility.
       PIPELINE_TOKEN:
         required: false
 
@@ -132,11 +123,6 @@ defaults:
 
 jobs:
 
-  # This workflow does not build anything itself -- it consumes the
-  # `ios-archive-unsigned` artifact the CALLER's own CI job already produced
-  # earlier in the same workflow run. The caller must run its CI job with
-  # `build_archive: true` -- see the pipeline README's "Consolidated CI+CD
-  # build" section.
   sign_ios:
     name: Sign iOS & Export IPA
     runs-on: macos-latest
@@ -145,8 +131,6 @@ jobs:
       signed: ${{ steps.chk.outputs.ok }}
 
     steps:
-      # Missing secrets never fail the run: signing is skipped, and the
-      # release/TestFlight jobs key off `ok`.
       - name: Check signing secrets
         id: chk
         env:
@@ -188,6 +172,7 @@ jobs:
           name: ios-ipa-signed
           path: ${{ runner.temp }}/export/*.ipa
           if-no-files-found: error
+
 
   sign_ios_esper:
     name: Sign iOS for Esper
@@ -232,7 +217,6 @@ jobs:
           method: ${{ inputs.esper_export_method }}
           archive: archive/ios-archive-unsigned.xcarchive
 
-      # Distinct name so it can sit next to the app-store IPA on the Release.
       - name: Rename Esper IPA
         if: ${{ steps.chk.outputs.ok == 'true' }}
         run: |
@@ -247,10 +231,11 @@ jobs:
           path: ${{ runner.temp }}/export/*.ipa
           if-no-files-found: error
 
+
+  # Runs even when a sign job is skipped; attaches whichever IPAs exist.
   create_release:
     name: Create GitHub Release
     needs: [sign_ios, sign_ios_esper]
-    # Either sign job may be skipped; !failure() lets this still run.
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
 
@@ -302,13 +287,14 @@ jobs:
           echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ steps.version_check.outputs.tag }}
           name: Release ${{ steps.version_check.outputs.tag }}
           generate_release_notes: true
           files: release/ios/*.ipa
           token: ${{ secrets.GITHUB_TOKEN }}
+
 
   deploy_testflight:
     name: Deploy to TestFlight
@@ -401,6 +387,7 @@ jobs:
             fastlane pilot upload --ipa "$IPA" --api_key_path api_key.json
           fi
 
+
   deploy_esper:
     name: Deploy to Esper
     if: ${{ inputs.deploy_to_esper && needs.sign_ios_esper.outputs.signed == 'true' }}
@@ -442,8 +429,6 @@ jobs:
             exit 1
           fi
 
-          # ponytail: endpoint copied from ops-rite-flutter-cicd and not yet
-          # verified against a real tenant; confirm before relying on it.
           HTTP_STATUS=$(curl -L -sS -w "%{http_code}" \
             -X POST "https://${ESPER_TENANT}-api.esper.cloud/api/v2/tenant-apps" \
             -H "Authorization: Bearer ${ESPER_API_KEY}" \

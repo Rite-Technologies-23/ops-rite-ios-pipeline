@@ -1,3 +1,6 @@
+# Composite action: installs a signing certificate and profile into a
+# temporary keychain, then exports an IPA from an unsigned archive.
+
 name: "iOS Export IPA"
 description: >-
   Installs a signing certificate and provisioning profile into a throwaway

@@ -1,32 +1,21 @@
-name: "iOS CI (Xcode) - Reusable"
+# Reusable iOS CI. Runs for the caller's tag pushes and builds the unsigned
+# Release archive that cd and the dSYM upload consume.
+#
+# 1. quality: lint and formatting.
+# 2. security: secret, code and dependency checks.
+# 3. dead_code, analyze: unused code and static analysis.
+# 4. test: unit tests with coverage against coverage_threshold.
+# 5. build: Release archive, uploaded as ios-archive-unsigned.
+# 6. summary: collects every job result into the run summary.
+#
+# Gates (fail_on_*) are set by the caller; the defaults here are strict.
 
-# ---------------------------------------------------------------------------
-# Complete CI for iOS/Swift, built entirely from free tooling.
-#
-#   Security          Semgrep OSS (Swift rules) + gitleaks + Trivy over
-#                     Package.resolved / Podfile.lock, plus the clang static
-#                     analyzer (optional)
-#   Dead code         Periphery (whole-project unused declarations) +
-#                     SwiftLint unused_declaration / unused_import
-#   Static typing     swiftc with strict concurrency and optional
-#                     warnings-as-errors, injected as xcodebuild overrides
-#   Lint + format     SwiftLint --strict (lint) + SwiftFormat --lint (format)
-#   Tests + coverage  xcodebuild test + xccov line-coverage gate
-#
-# Compiler strictness is injected through xcodebuild build-setting overrides,
-# so a caller repository needs no .xcodeproj or .xcconfig changes.
-#
-# COST NOTE: GitHub bills macOS runners at 10x. Three stages compile the
-# project (test, dead code, archive). The security stage deliberately runs on
-# ubuntu at 1x because gitleaks/Semgrep/Trivy need no Xcode. The clang analyzer
-# stage is a fourth compile and is therefore opt-in.
-# ---------------------------------------------------------------------------
+name: "iOS CI (Xcode) - Reusable"
 
 on:
   workflow_call:
     inputs:
 
-      # ---- core (unchanged contract) ----
       xcode_version:
         required: false
         type: string
@@ -115,7 +104,6 @@ on:
         default: true
         description: "SwiftLint. Previously a no-op placeholder; now a real gate."
 
-      # ---- runners ----
       runner:
         required: false
         type: string
@@ -129,20 +117,17 @@ on:
           The security stage needs no Xcode, so it defaults to a 1x-billed
           Linux runner instead of a 10x-billed macOS one.
 
-      # ---- formatting (the black equivalent) ----
       run_formatting:
         required: false
         type: boolean
         default: true
 
-      # ---- dead code (the vulture equivalent) ----
       run_dead_code:
         required: false
         type: boolean
         default: true
         description: "Periphery whole-project unused-declaration scan. Compiles the project."
 
-      # ---- security (the bandit equivalent) ----
       run_security:
         required: false
         type: boolean
@@ -162,7 +147,6 @@ on:
           10x runner and finds little in Swift-only codebases (the clang
           analyzer targets C/Objective-C).
 
-      # ---- static typing strictness ----
       swift_warnings_as_errors:
         required: false
         type: boolean
@@ -177,7 +161,6 @@ on:
         default: "targeted"
         description: "off | minimal | targeted | complete. 'complete' floods pre-Swift-6 code."
 
-      # ---- test tuning ----
       test_destination:
         required: false
         type: string
@@ -204,7 +187,6 @@ on:
         default: "([Tt]ests?|UITests|Mock|Fixture)"
         description: "Regex of coverage targets to exclude."
 
-      # ---- gates ----
       fail_on_lint:
         required: false
         type: boolean
@@ -260,15 +242,11 @@ on:
         value: ${{ jobs.test.outputs.scheme }}
 
 env:
-  # Tool versions, consumed by the setup action's installer. Bump them here.
   SWIFTLINT_VERSION: "0.57.0"
   SWIFTFORMAT_VERSION: "0.55.5"
   PERIPHERY_VERSION: "3.0.0"
   XCBEAUTIFY_VERSION: "2.16.0"
   GITLEAKS_VERSION: "8.21.2"
-  # 0.58.1 (the previous pin) no longer has downloadable release assets on
-  # GitHub -- verified 404 on trivy_0.58.1_Linux-64bit.tar.gz as of 2026-09-10
-  # (same finding as the Android pipeline; see its push.yml for the source).
   TRIVY_VERSION: "0.74.0"
   SEMGREP_VERSION: "1.165.0"
 
@@ -285,10 +263,6 @@ concurrency:
 
 jobs:
 
-  # =========================================================================
-  # 1. LINT + FORMAT  (the pylint + black equivalent)
-  #    No Xcode build required -- both tools parse source directly.
-  # =========================================================================
   quality:
     name: Lint & Format
     runs-on: ${{ inputs.runner }}
@@ -317,9 +291,6 @@ jobs:
           resolve_dependencies: "false"
           cache_key_suffix: quality
 
-      # -------------------------------------------------------------------
-      # Formatting gate. `swiftformat .` is the local fix.
-      # -------------------------------------------------------------------
       - name: Format check (SwiftFormat)
         if: ${{ inputs.run_formatting }}
         continue-on-error: ${{ !inputs.fail_on_formatting }}
@@ -343,10 +314,6 @@ jobs:
         if: ${{ failure() && inputs.run_formatting }}
         run: echo "::notice::Run 'swiftformat .' locally to fix formatting."
 
-      # -------------------------------------------------------------------
-      # SwiftLint. This replaces the previous "Static analysis placeholder"
-      # echo statement, which never ran anything.
-      # -------------------------------------------------------------------
       - name: Lint (SwiftLint)
         if: ${{ inputs.run_static_analysis }}
         continue-on-error: ${{ !inputs.fail_on_lint }}
@@ -360,8 +327,6 @@ jobs:
             CONFIG=".swiftlint.yml"
           fi
 
-          # Two passes: a machine-readable report for the summary, then the
-          # gating pass. --strict promotes warnings to errors.
           swiftlint lint --config "$CONFIG" --reporter json > build/reports/swiftlint.json || true
           swiftlint lint --config "$CONFIG" --reporter github-actions-logging --strict
 
@@ -386,10 +351,7 @@ jobs:
         shell: bash
         run: rm -rf ../swiftpackage
 
-  # =========================================================================
-  # 2. SECURITY  (the bandit equivalent)
-  #    Runs on Linux: none of these tools need Xcode, and macOS costs 10x.
-  # =========================================================================
+
   security:
     name: Security Scan
     runs-on: ${{ inputs.security_runner }}
@@ -400,7 +362,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # gitleaks scans history, not just the worktree
+          fetch-depth: 0
 
       - name: Checkout pipeline configs
         uses: actions/checkout@v4
@@ -431,9 +393,6 @@ jobs:
             chmod +x "$BIN/trivy"
           fi
 
-      # -------------------------------------------------------------------
-      # 2a. Secret scanning
-      # -------------------------------------------------------------------
       - name: Scan for committed secrets
         if: ${{ inputs.run_security }}
         continue-on-error: ${{ !inputs.fail_on_security }}
@@ -448,10 +407,6 @@ jobs:
             --exit-code 1 \
             --verbose
 
-      # -------------------------------------------------------------------
-      # 2b. SAST -- Semgrep OSS. Swift support is GA; registry packs are free
-      #     and need no token.
-      # -------------------------------------------------------------------
       - name: Set up Python
         if: ${{ inputs.run_security }}
         uses: actions/setup-python@v5
@@ -467,8 +422,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Never fail here -- the gate step below decides, so that a registry
-          # outage cannot be mistaken for a security finding.
           semgrep scan \
             --config r/swift \
             --config p/secrets \
@@ -502,11 +455,6 @@ jobs:
             exit 1
           fi
 
-      # -------------------------------------------------------------------
-      # 2c. Dependency CVEs.
-      #     Easier than Android: Package.resolved and Podfile.lock are real
-      #     lockfiles, so Trivy reads them directly -- no SBOM step needed.
-      # -------------------------------------------------------------------
       - name: Scan dependencies for known CVEs
         if: ${{ inputs.run_dependency_audit }}
         continue-on-error: ${{ !inputs.fail_on_vulnerabilities }}
@@ -552,10 +500,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-  # =========================================================================
-  # 3. DEAD CODE  (the vulture equivalent)
-  #    Periphery indexes the whole project, so it must compile.
-  # =========================================================================
+
   dead_code:
     name: Dead Code Analysis
     runs-on: ${{ inputs.runner }}
@@ -605,8 +550,6 @@ jobs:
           set -euo pipefail
           mkdir -p build/reports
 
-          # Periphery drives xcodebuild itself and only understands --project,
-          # so a workspace-based repo is pointed at the project inside it.
           PROJ="$PROJECT_FILE"
           if [ "$PROJECT_TYPE" = "workspace" ]; then
             PROJ=$(find . -name '*.xcodeproj' \
@@ -661,9 +604,7 @@ jobs:
         shell: bash
         run: rm -rf ../swiftpackage
 
-  # =========================================================================
-  # 4. CLANG STATIC ANALYZER  (opt-in: a fourth full compile on a 10x runner)
-  # =========================================================================
+
   analyze:
     name: Clang Static Analyzer
     runs-on: ${{ inputs.runner }}
@@ -702,8 +643,6 @@ jobs:
           set -euo pipefail
           mkdir -p build/reports build/analyzer
 
-          # mapfile needs bash 4+; macOS ships /bin/bash 3.2 (Apple won't
-          # distribute GPLv3 bash), so this reads lines by hand instead.
           STRICT=()
           while IFS= read -r line; do
             STRICT+=("$line")
@@ -747,9 +686,7 @@ jobs:
         shell: bash
         run: rm -rf ../swiftpackage
 
-  # =========================================================================
-  # 5. TESTS + COVERAGE
-  # =========================================================================
+
   test:
     name: Unit Tests & Coverage
     runs-on: ${{ inputs.runner }}
@@ -783,7 +720,6 @@ jobs:
           cache_derived_data: "true"
           cache_key_suffix: test
 
-      # A hardcoded simulator name breaks on every runner-image bump.
       - name: Resolve simulator destination
         id: destination
         run: bash .pipeline/.github/tool/scripts/resolve_destination.sh "${{ inputs.test_destination }}"
@@ -800,8 +736,6 @@ jobs:
           echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> "$GITHUB_ENV"
           rm -rf "$RESULT_BUNDLE"
 
-          # mapfile needs bash 4+; macOS ships /bin/bash 3.2 (Apple won't
-          # distribute GPLv3 bash), so this reads lines by hand instead.
           STRICT=()
           while IFS= read -r line; do
             STRICT+=("$line")
@@ -812,8 +746,6 @@ jobs:
             EXTRA+=("-testPlan" "${{ inputs.test_plan }}")
           fi
 
-          # pipefail matters: without it xcbeautify's exit code masks a failing
-          # xcodebuild and the job goes green on failing tests.
           set -o pipefail
           xcodebuild test \
             -"${{ steps.setup.outputs.project_type }}" "${{ steps.setup.outputs.project_file }}" \
@@ -862,9 +794,7 @@ jobs:
         shell: bash
         run: rm -rf ../swiftpackage
 
-  # =========================================================================
-  # 6. ARCHIVE  (artifact contract consumed by release.yml)
-  # =========================================================================
+
   build:
     name: Build Unsigned Archive
     runs-on: ${{ inputs.runner }}
@@ -905,8 +835,6 @@ jobs:
 
           ARCHIVE_PATH="artifact/ios-archive-unsigned.xcarchive"
 
-          # mapfile needs bash 4+; macOS ships /bin/bash 3.2 (Apple won't
-          # distribute GPLv3 bash), so this reads lines by hand instead.
           STRICT=()
           while IFS= read -r line; do
             STRICT+=("$line")
@@ -925,7 +853,6 @@ jobs:
           echo "Archive contents:"
           ls -la "$ARCHIVE_PATH"
 
-      # Artifact name is a contract with release.yml -- do not rename.
       - name: Upload Archive
         if: always()
         uses: actions/upload-artifact@v4
@@ -940,9 +867,7 @@ jobs:
         shell: bash
         run: rm -rf ../swiftpackage
 
-  # =========================================================================
-  # 7. SUMMARY
-  # =========================================================================
+
   summary:
     name: CI Summary
     runs-on: ubuntu-latest

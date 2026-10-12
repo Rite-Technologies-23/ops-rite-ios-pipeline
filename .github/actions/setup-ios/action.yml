@@ -1,3 +1,7 @@
+# Composite setup for iOS jobs. Resolves this pipeline's source, optionally
+# checks out and builds Hl7Core's Swift package, selects Xcode, detects the
+# project and scheme, restores caches, and installs the CLI tools.
+
 name: "Setup iOS Build Environment"
 description: >-
   Shared setup for every CI job: resolves and checks out the pipeline repo (for
@@ -134,16 +138,6 @@ runs:
   using: "composite"
   steps:
 
-    # ----------------------------------------------------------------------
-    # github.repository is the CALLER inside a reusable workflow, so it can't
-    # identify this pipeline. GITHUB_WORKFLOW_REF doesn't work either -- it
-    # resolves to the top-level (caller's) workflow file, not the reusable
-    # workflow currently executing, so parsing it previously checked out the
-    # CALLER's own repo into .pipeline instead of this pipeline repo.
-    # GITHUB_ACTION_REPOSITORY/GITHUB_ACTION_REF are set specifically to
-    # identify the repo@ref of the action that's currently running -- this
-    # composite action itself -- which is exactly what's needed here.
-    # ----------------------------------------------------------------------
     - name: Resolve pipeline source
       id: resolve
       shell: bash
@@ -176,18 +170,6 @@ runs:
         token: ${{ inputs.pipeline_token != '' && inputs.pipeline_token || github.token }}
         persist-credentials: false
 
-    # ----------------------------------------------------------------------
-    # Some callers (mobrite_pill_counter_ios) reference Hl7Core as a LOCAL
-    # Swift package (relativePath ../../swiftpackage) rather than a remote
-    # one, because Hl7Core's Package.swift lives at hl7Core/swiftpackage in
-    # its repo, not at the repo root -- SPM's remote-package resolution can't
-    # target a subdirectory, only a local path or a repo-root manifest. So we
-    # reconstruct that same sibling layout on the runner: check out just the
-    # generated hl7Core/swiftpackage folder and place it where the local
-    # reference expects it, one directory above the caller's checkout. This
-    # is fetched fresh every run and torn down by "Cleanup Hl7Core swiftpackage"
-    # in the calling workflow -- nothing is ever committed anywhere.
-    # ----------------------------------------------------------------------
     - name: Checkout Hl7Core Swift package
       id: checkout_hl7core
       if: ${{ inputs.checkout_hl7core == 'true' }}
@@ -195,12 +177,7 @@ runs:
       with:
         repository: ${{ inputs.hl7core_repo }}
         ref: ${{ inputs.hl7core_ref }}
-        # actions/checkout refuses any path outside $GITHUB_WORKSPACE, so this
-        # checks out inside it (as a throwaway subfolder) and the next step
-        # moves just the swiftpackage folder out to the sibling location with
-        # a plain `mv`, which isn't subject to that restriction.
         path: hl7core-src
-        # Empty = full checkout, which the Gradle build needs.
         sparse-checkout: ${{ inputs.build_hl7core != 'true' && 'hl7Core/swiftpackage' || '' }}
         sparse-checkout-cone-mode: false
         token: ${{ inputs.hl7core_token != '' && inputs.hl7core_token || (inputs.pipeline_token != '' && inputs.pipeline_token || github.token) }}
@@ -248,7 +225,6 @@ runs:
         ./gradlew :hl7Core:createSwiftPackage --no-daemon
         test -d hl7Core/swiftpackage || { echo "::error::createSwiftPackage did not produce hl7Core/swiftpackage"; exit 1; }
 
-    # Saved here, before the stage step below moves the folder out of hl7core-src.
     - name: Save built Hl7Core swiftpackage
       if: ${{ inputs.checkout_hl7core == 'true' && inputs.build_hl7core == 'true' && steps.hl7core_cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v4
@@ -292,11 +268,6 @@ runs:
         INPUT_SCHEME: ${{ inputs.scheme }}
       run: bash "$GITHUB_ACTION_PATH/detect_project.sh"
 
-    # ----------------------------------------------------------------------
-    # Caching. SPM checkouts and Pods are keyed on their lockfiles; DerivedData
-    # is keyed loosely and restored best-effort, because a stale-but-warm
-    # DerivedData still saves most of a compile.
-    # ----------------------------------------------------------------------
     - name: Cache Swift Package Manager
       if: ${{ runner.os == 'macOS' }}
       uses: actions/cache@v4
